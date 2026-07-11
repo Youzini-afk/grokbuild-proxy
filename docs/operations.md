@@ -11,6 +11,11 @@
 The Admin System page/API includes aggregate pool health. It never exposes
 plaintext OAuth or client secrets.
 
+Credential and client-key reads use versioned in-memory snapshots. Durable token
+rotation and failure state remain synchronous; high-frequency `last_used`
+timestamps are coalesced and flushed every 30 seconds and during graceful
+shutdown.
+
 ## Logs
 
 Logs are JSON on stdout. Request records include request ID, method, route

@@ -48,6 +48,13 @@ type Selector struct {
 	sticky map[string]stickyBinding
 	states map[string]*runtimeState
 	store  healthStore
+
+	poolVersion uint64
+	pool        map[string]storage.Credential
+	poolOrder   []string
+	priorityIDs map[int][]string
+	priorities  []int
+	modelStates map[string]map[string]*runtimeState
 }
 
 // SetHealthStore enables durable failure/cooldown state. It returns s for
@@ -81,7 +88,123 @@ func New(cfg config.LBConfig) *Selector {
 		priorityRR:   make(map[int]int),
 		sticky:       make(map[string]stickyBinding),
 		states:       make(map[string]*runtimeState),
+		pool:         make(map[string]storage.Credential),
+		priorityIDs:  make(map[int][]string),
+		modelStates:  make(map[string]map[string]*runtimeState),
 	}
+}
+
+// SyncCredentials rebuilds the immutable scheduling index only when the store
+// snapshot version changes. Normal picks are then O(number of skipped peers)
+// rather than O(total credentials).
+func (s *Selector) SyncCredentials(version uint64, credentials []storage.Credential) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if version != 0 && version == s.poolVersion {
+		return
+	}
+	pool := make(map[string]storage.Credential, len(credentials))
+	order := make([]string, 0, len(credentials))
+	groups := make(map[int][]string)
+	prioritySet := make(map[int]struct{})
+	for _, credential := range credentials {
+		pool[credential.ID] = credential
+		order = append(order, credential.ID)
+		groups[credential.Priority] = append(groups[credential.Priority], credential.ID)
+		prioritySet[credential.Priority] = struct{}{}
+		s.seedState(credential)
+	}
+	priorities := make([]int, 0, len(prioritySet))
+	for priority := range prioritySet {
+		priorities = append(priorities, priority)
+	}
+	sort.Sort(sort.Reverse(sort.IntSlice(priorities)))
+	for id := range s.states {
+		if _, ok := pool[id]; !ok {
+			delete(s.states, id)
+			delete(s.modelStates, id)
+		}
+	}
+	for key, binding := range s.sticky {
+		if _, ok := pool[binding.CredID]; !ok {
+			delete(s.sticky, key)
+		}
+	}
+	s.poolVersion = version
+	s.pool = pool
+	s.poolOrder = order
+	s.priorityIDs = groups
+	s.priorities = priorities
+}
+
+// PickCached selects from the prebuilt in-memory index.
+func (s *Selector) PickCached(excluded map[string]struct{}, stickyKey, model string, now time.Time) (storage.Credential, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if stickyKey != "" {
+		if id, ok := s.getSticky(stickyKey, now); ok && s.cachedAvailable(id, model, excluded, now) {
+			return s.pool[id], nil
+		}
+	}
+	var picked storage.Credential
+	var ok bool
+	if s.strategy == "round_robin" {
+		picked, ok = s.pickCachedRoundRobin(model, excluded, now)
+	} else {
+		picked, ok = s.pickCachedPriority(model, excluded, now)
+	}
+	if !ok {
+		return storage.Credential{}, ErrNoCredential
+	}
+	if stickyKey != "" {
+		s.bindSticky(stickyKey, picked.ID, now)
+	}
+	return picked, nil
+}
+
+func (s *Selector) pickCachedRoundRobin(model string, excluded map[string]struct{}, now time.Time) (storage.Credential, bool) {
+	count := len(s.poolOrder)
+	for n := 0; n < count; n++ {
+		idx := s.rrIndex % count
+		s.rrIndex = (idx + 1) % count
+		id := s.poolOrder[idx]
+		if s.cachedAvailable(id, model, excluded, now) {
+			return s.pool[id], true
+		}
+	}
+	return storage.Credential{}, false
+}
+
+func (s *Selector) pickCachedPriority(model string, excluded map[string]struct{}, now time.Time) (storage.Credential, bool) {
+	for _, priority := range s.priorities {
+		group := s.priorityIDs[priority]
+		count := len(group)
+		for n := 0; n < count; n++ {
+			idx := s.priorityRR[priority] % count
+			s.priorityRR[priority] = (idx + 1) % count
+			id := group[idx]
+			if s.cachedAvailable(id, model, excluded, now) {
+				return s.pool[id], true
+			}
+		}
+	}
+	return storage.Credential{}, false
+}
+
+func (s *Selector) cachedAvailable(id, model string, excluded map[string]struct{}, now time.Time) bool {
+	if _, skip := excluded[id]; skip {
+		return false
+	}
+	credential, ok := s.pool[id]
+	if !ok || !credential.Enabled || s.inCooldown(credential, now) {
+		return false
+	}
+	if states := s.modelStates[id]; states != nil {
+		if state := states[model]; state != nil && state.CooldownUntil.After(now) {
+			return false
+		}
+	}
+	return true
 }
 
 // Available returns credentials that are enabled and not in cooldown (storage fields only).
@@ -201,6 +324,46 @@ func (s *Selector) MarkFailure(credID string, status int, retryAfter time.Durati
 	if store != nil {
 		s.persistHealth(store, credID, snapshot)
 	}
+}
+
+// MarkModelFailure cools a credential only for one model. This prevents a
+// model entitlement/availability error from disabling otherwise usable models.
+func (s *Selector) MarkModelFailure(credID, model string, status int, retryAfter time.Duration, now time.Time) {
+	if credID == "" || model == "" {
+		s.MarkFailure(credID, status, retryAfter, now)
+		return
+	}
+	s.mu.Lock()
+	states := s.modelStates[credID]
+	if states == nil {
+		states = make(map[string]*runtimeState)
+		s.modelStates[credID] = states
+	}
+	state := states[model]
+	if state == nil {
+		state = &runtimeState{}
+		states[model] = state
+	}
+	state.FailureCount++
+	state.CooldownUntil = now.Add(s.cooldownDuration(status, retryAfter, state.FailureCount-1))
+	state.LastError = fmt.Sprintf("http %d", status)
+	s.clearStickyForCred(credID)
+	s.mu.Unlock()
+}
+
+// MarkModelSuccess clears model-local backoff and records global success.
+func (s *Selector) MarkModelSuccess(credID, model, stickyKey string, now time.Time) {
+	if model != "" {
+		s.mu.Lock()
+		if states := s.modelStates[credID]; states != nil {
+			delete(states, model)
+			if len(states) == 0 {
+				delete(s.modelStates, credID)
+			}
+		}
+		s.mu.Unlock()
+	}
+	s.MarkSuccess(credID, stickyKey, now)
 }
 
 func (s *Selector) persistHealth(store healthStore, credID string, snapshot healthSnapshot) {

@@ -162,7 +162,8 @@ HTTP 402 and 429 can fail over before a response body is sent. Credential health
 survives process restarts.
 
 OAuth refresh is currently request-driven; there is no background pre-refresh
-scheduler.
+scheduler for cold credentials. Recently used credentials are pre-refreshed by
+a bounded worker pool; all others remain demand-driven to avoid refresh storms.
 
 ## Storage
 
@@ -178,6 +179,9 @@ Storage properties:
 
 - Process-lifetime data-directory lock
 - SQLite WAL transactions and indexed credential lookup
+- Versioned in-memory credential/client snapshots on request hot paths
+- O(1) round-robin picks after a snapshot rebuild
+- Coalesced asynchronous `last_used` persistence
 - Automatic one-time migration from legacy JSON snapshots
 - Migration selects the largest valid primary/backup generation
 - `0600` secret files and `0700` newly created directories
@@ -227,6 +231,7 @@ Prompts, request bodies, OAuth tokens, and generated keys are not logged.
 | Responses as canonical upstream | Preserves current Grok capabilities | Requires protocol state machines |
 | Loopback-first | Protects credentials and quota by default | Containers require explicit internal bind |
 | Sticky credential sessions | Improves cache and encrypted-state continuity | Failover can lose account-bound reasoning state |
+| Hot-only refresh scheduler | Avoids expiry stalls without refreshing an entire cold pool | First use of a cold account may refresh on demand |
 | Explicit compatibility matrix | Avoids claiming full API emulation | Unsupported features remain visible |
 
 ## Known limitations

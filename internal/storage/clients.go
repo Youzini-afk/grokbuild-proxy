@@ -36,6 +36,9 @@ type CreateClientResult struct {
 
 // ListClients returns all client key records (no plaintext).
 func (s *Store) ListClients() ([]ClientKey, error) {
+	if s.db != nil {
+		return s.cachedClients(), nil
+	}
 	var out []ClientKey
 	err := s.withLock(func() error {
 		doc, err := s.loadClients()
@@ -154,6 +157,13 @@ func (s *Store) LookupClientByPlaintext(plaintext string) (ClientKey, bool, erro
 		return ClientKey{}, false, nil
 	}
 	hash := HashKey(plaintext)
+	if s.db != nil {
+		client, ok := s.cachedClientByHash(hash)
+		if !ok || client.Disabled {
+			return ClientKey{}, false, nil
+		}
+		return client, true, nil
+	}
 	var found ClientKey
 	var ok bool
 	err := s.withLock(func() error {

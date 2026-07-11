@@ -116,6 +116,16 @@ func main() {
 		Logger:    logger,
 		RequestID: httpserver.RequestIDFromContext,
 	}
+	schedulerCtx, stopScheduler := context.WithCancel(context.Background())
+	defer stopScheduler()
+	if cfg.LB.RefreshWorkers > 0 && cfg.LB.RefreshIntervalSec > 0 {
+		go exec.RunRefreshScheduler(
+			schedulerCtx,
+			time.Duration(cfg.LB.RefreshIntervalSec)*time.Second,
+			time.Duration(cfg.LB.RefreshActiveWindowSec)*time.Second,
+			cfg.LB.RefreshWorkers,
+		)
+	}
 
 	oai := &openai.Handlers{
 		Post:    exec.Post,
@@ -167,6 +177,7 @@ func main() {
 	signal.Notify(stop, syscall.SIGINT, syscall.SIGTERM)
 	sig := <-stop
 	logger.Info("shutdown_signal", "signal", sig.String())
+	stopScheduler()
 
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()

@@ -29,6 +29,18 @@ type Store struct {
 
 	mu   sync.Mutex
 	lock *os.File
+
+	cacheMu           sync.RWMutex
+	credentialCache   []Credential
+	credentialByID    map[string]Credential
+	credentialVersion uint64
+	clientCache       []ClientKey
+	clientByHash      map[string]ClientKey
+
+	runtimeMu    sync.Mutex
+	pendingUsage map[string]time.Time
+	runtimeStop  chan struct{}
+	runtimeDone  chan struct{}
 }
 
 // New creates a Store rooted at dir. The directory is created with mode 0700.
@@ -78,6 +90,13 @@ func New(dir string) (*Store, error) {
 		_ = instanceLock.Close()
 		return nil, err
 	}
+	if err := store.reloadCaches(); err != nil {
+		_ = store.db.Close()
+		_ = unlockFile(instanceLock)
+		_ = instanceLock.Close()
+		return nil, err
+	}
+	store.startRuntimeFlusher()
 	return store, nil
 }
 
@@ -120,6 +139,7 @@ func (s *Store) Close() error {
 	if s == nil {
 		return nil
 	}
+	s.stopRuntimeFlusher()
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.lock == nil {

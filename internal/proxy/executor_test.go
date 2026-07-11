@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -259,6 +260,33 @@ func TestExecutorPostFailoverOnPaymentRequired(t *testing.T) {
 	raw, _ := io.ReadAll(resp.Body)
 	if resp.StatusCode != http.StatusOK || !strings.Contains(string(raw), "ok-from-b") {
 		t.Fatalf("status=%d body=%s", resp.StatusCode, raw)
+	}
+}
+
+func TestExecutorDoesNotFailoverRegionalModelError(t *testing.T) {
+	var hits atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hits.Add(1)
+		w.WriteHeader(http.StatusForbidden)
+		_, _ = w.Write([]byte(`{"code":"permission-denied","error":"The model grok-4.5 is not available in your region."}`))
+	}))
+	t.Cleanup(srv.Close)
+	store := newMemStore(
+		storage.Credential{ID: "cred_a", AccessToken: "token-a", Enabled: true, Priority: 200},
+		storage.Credential{ID: "cred_b", AccessToken: "token-b", Enabled: true, Priority: 100},
+	)
+	ex := &Executor{
+		Store: store, Selector: lb.New(config.LBConfig{Strategy: "priority_rr"}),
+		Upstream:  upstream.NewClient(upstream.Config{BaseURL: srv.URL + "/v1", HTTPClient: srv.Client()}),
+		Refresher: passthroughRefresher{}, MaxAttempts: 3,
+	}
+	resp, err := ex.Post(context.Background(), "grok-4.5", "", []byte(`{}`), false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusForbidden || hits.Load() != 1 {
+		t.Fatalf("status=%d hits=%d", resp.StatusCode, hits.Load())
 	}
 }
 

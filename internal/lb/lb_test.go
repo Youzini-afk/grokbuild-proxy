@@ -496,6 +496,34 @@ func TestPersistedHealthCannotReorderFailureAfterSuccess(t *testing.T) {
 	}
 }
 
+func TestCachedSelectorUsesSnapshotAndModelScopedCooldown(t *testing.T) {
+	now := time.Now()
+	selector := New(testCfg("priority_rr"))
+	credentials := []storage.Credential{
+		{ID: "high", Enabled: true, Priority: 200, AccessToken: "a"},
+		{ID: "low", Enabled: true, Priority: 100, AccessToken: "b"},
+	}
+	selector.SyncCredentials(1, credentials)
+	picked, err := selector.PickCached(nil, "", "grok-a", now)
+	if err != nil || picked.ID != "high" {
+		t.Fatalf("first pick=%s err=%v", picked.ID, err)
+	}
+	selector.MarkModelFailure("high", "grok-a", 403, 0, now)
+	picked, err = selector.PickCached(nil, "", "grok-a", now)
+	if err != nil || picked.ID != "low" {
+		t.Fatalf("model-scoped fallback=%s err=%v", picked.ID, err)
+	}
+	picked, err = selector.PickCached(nil, "", "grok-b", now)
+	if err != nil || picked.ID != "high" {
+		t.Fatalf("other model should use high=%s err=%v", picked.ID, err)
+	}
+	selector.SyncCredentials(2, credentials[1:])
+	picked, err = selector.PickCached(nil, "", "grok-b", now)
+	if err != nil || picked.ID != "low" {
+		t.Fatalf("deleted credential remained cached: pick=%s err=%v", picked.ID, err)
+	}
+}
+
 func ids(creds []storage.Credential) []string {
 	out := make([]string, len(creds))
 	for i, c := range creds {

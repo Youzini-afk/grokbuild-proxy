@@ -59,10 +59,13 @@ type AnthropicConfig struct {
 
 // LBConfig controls multi-credential selection and sticky sessions.
 type LBConfig struct {
-	Strategy       string         `yaml:"strategy"`
-	StickyTTLSec   int            `yaml:"sticky_ttl_sec"`
-	RefreshSkewSec int            `yaml:"refresh_skew_sec"`
-	Cooldown       CooldownConfig `yaml:"cooldown"`
+	Strategy               string         `yaml:"strategy"`
+	StickyTTLSec           int            `yaml:"sticky_ttl_sec"`
+	RefreshSkewSec         int            `yaml:"refresh_skew_sec"`
+	RefreshWorkers         int            `yaml:"refresh_workers"`
+	RefreshIntervalSec     int            `yaml:"refresh_interval_sec"`
+	RefreshActiveWindowSec int            `yaml:"refresh_active_window_sec"`
+	Cooldown               CooldownConfig `yaml:"cooldown"`
 }
 
 // CooldownConfig is exponential backoff bounds for failed credentials.
@@ -127,9 +130,12 @@ func Default() Config {
 			CountTokens:         false,
 		},
 		LB: LBConfig{
-			Strategy:       "priority_rr",
-			StickyTTLSec:   3600,
-			RefreshSkewSec: 180,
+			Strategy:               "priority_rr",
+			StickyTTLSec:           3600,
+			RefreshSkewSec:         180,
+			RefreshWorkers:         4,
+			RefreshIntervalSec:     30,
+			RefreshActiveWindowSec: 1800,
 			Cooldown: CooldownConfig{
 				BaseSec: 300,
 				MaxSec:  3600,
@@ -237,6 +243,9 @@ func (c Config) Validate() error {
 	}
 	if c.LB.RefreshSkewSec < 0 {
 		return fmt.Errorf("lb.refresh_skew_sec must be >= 0")
+	}
+	if c.LB.RefreshWorkers < 0 || c.LB.RefreshIntervalSec < 0 || c.LB.RefreshActiveWindowSec < 0 {
+		return fmt.Errorf("lb refresh scheduler values must be >= 0")
 	}
 	if c.LB.Cooldown.BaseSec < 0 || c.LB.Cooldown.MaxSec < 0 {
 		return fmt.Errorf("lb.cooldown base_sec/max_sec must be >= 0")

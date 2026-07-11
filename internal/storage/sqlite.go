@@ -224,27 +224,15 @@ func readRawJSON(path string, target any) error {
 }
 
 func (s *Store) dbListCredentials() ([]Credential, error) {
-	var out []Credential
-	err := s.withLock(func() error {
-		var err error
-		out, err = listCredentialsQuery(s.db, `SELECT `+credentialColumns+` FROM credentials ORDER BY priority DESC,id`)
-		return err
-	})
-	return out, err
+	return s.cachedCredentials(), nil
 }
 
 func (s *Store) dbGetCredential(id string) (Credential, error) {
-	var credential Credential
-	err := s.withLock(func() error {
-		row := s.db.QueryRow(`SELECT `+credentialColumns+` FROM credentials WHERE id=?`, id)
-		var err error
-		credential, err = scanCredential(row)
-		if err == sql.ErrNoRows {
-			return fmt.Errorf("storage: credential %q not found", id)
-		}
-		return err
-	})
-	return credential, err
+	credential, ok := s.cachedCredential(id)
+	if !ok {
+		return Credential{}, fmt.Errorf("storage: credential %q not found", id)
+	}
+	return credential, nil
 }
 
 func (s *Store) dbCreateCredential(in CreateCredentialInput) (Credential, error) {
@@ -267,7 +255,11 @@ func (s *Store) dbCreateCredential(in CreateCredentialInput) (Credential, error)
 		}
 		created = Credential{ID: id, Enabled: enabled, Priority: priority, CreatedAt: now, UpdatedAt: now}
 		applyCredentialInput(&created, in)
-		return putCredentialDB(s.db, created)
+		if err := putCredentialDB(s.db, created); err != nil {
+			return err
+		}
+		s.cacheCredential(created)
+		return nil
 	})
 	return created, err
 }
@@ -323,7 +315,11 @@ func (s *Store) dbBulkUpsertCredentials(inputs []CreateCredentialInput) ([]BulkU
 			index.add(len(credentials)-1, credential)
 			results[i] = BulkUpsertResult{Credential: credential, Created: true}
 		}
-		return tx.Commit()
+		if err := tx.Commit(); err != nil {
+			return err
+		}
+		s.replaceCredentialCache(credentials)
+		return nil
 	})
 	return results, err
 }
@@ -334,19 +330,16 @@ func (s *Store) dbUpdateCredential(c Credential) (Credential, error) {
 	}
 	var updated Credential
 	err := s.withLock(func() error {
-		row := s.db.QueryRow(`SELECT `+credentialColumns+` FROM credentials WHERE id=?`, c.ID)
-		current, err := scanCredential(row)
-		if err == sql.ErrNoRows {
+		current, ok := s.cachedCredential(c.ID)
+		if !ok {
 			return fmt.Errorf("storage: credential %q not found", c.ID)
-		}
-		if err != nil {
-			return err
 		}
 		c.CreatedAt = current.CreatedAt
 		c.UpdatedAt = nowUTC()
 		if err := putCredentialDB(s.db, c); err != nil {
 			return err
 		}
+		s.cacheCredential(c)
 		updated = c
 		return nil
 	})
@@ -359,12 +352,9 @@ func (s *Store) dbPatchCredential(id string, mutate func(*Credential) error) (Cr
 	}
 	var updated Credential
 	err := s.withLock(func() error {
-		current, err := scanCredential(s.db.QueryRow(`SELECT `+credentialColumns+` FROM credentials WHERE id=?`, id))
-		if err == sql.ErrNoRows {
+		current, ok := s.cachedCredential(id)
+		if !ok {
 			return fmt.Errorf("storage: credential %q not found", id)
-		}
-		if err != nil {
-			return err
 		}
 		if err := mutate(&current); err != nil {
 			return err
@@ -374,6 +364,7 @@ func (s *Store) dbPatchCredential(id string, mutate func(*Credential) error) (Cr
 		if err := putCredentialDB(s.db, current); err != nil {
 			return err
 		}
+		s.cacheCredential(current)
 		updated = current
 		return nil
 	})
@@ -390,6 +381,7 @@ func (s *Store) dbDeleteCredential(id string) error {
 		if rows == 0 {
 			return fmt.Errorf("storage: credential %q not found", id)
 		}
+		s.removeCachedCredential(id)
 		return nil
 	})
 }
@@ -566,7 +558,11 @@ func (s *Store) dbSaveClients(doc clientsDoc) error {
 			return err
 		}
 	}
-	return tx.Commit()
+	if err := tx.Commit(); err != nil {
+		return err
+	}
+	s.replaceClientCache(doc.Clients)
+	return nil
 }
 
 func (s *Store) dbLoadMeta() (bootstrapMeta, error) {

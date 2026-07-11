@@ -57,7 +57,9 @@ func NewClient(cfg Config) *Client {
 			Transport: &http.Transport{
 				Proxy:                 http.ProxyFromEnvironment,
 				ForceAttemptHTTP2:     true,
-				MaxIdleConns:          32,
+				MaxIdleConns:          256,
+				MaxIdleConnsPerHost:   128,
+				MaxConnsPerHost:       256,
 				IdleConnTimeout:       90 * time.Second,
 				TLSHandshakeTimeout:   10 * time.Second,
 				ResponseHeaderTimeout: timeout,

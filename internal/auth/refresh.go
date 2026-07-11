@@ -179,6 +179,20 @@ func (r *Refresher) store(key string, ts TokenSet) {
 	r.cache[key] = ts
 }
 
+// PruneCredentials removes cached token material for deleted credentials.
+func (r *Refresher) PruneCredentials(keep map[string]struct{}) {
+	if r == nil {
+		return
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	for key := range r.cache {
+		if _, ok := keep[key]; !ok {
+			delete(r.cache, key)
+		}
+	}
+}
+
 func (r *Refresher) now() time.Time {
 	if r != nil && r.Now != nil {
 		return r.Now()

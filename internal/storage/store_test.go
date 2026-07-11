@@ -658,6 +658,32 @@ func TestJSONMigrationPrefersLargestValidSnapshotAndRunsOnce(t *testing.T) {
 	}
 }
 
+func TestRecordCredentialUsageFlushesOnClose(t *testing.T) {
+	dir := t.TempDir()
+	s, err := New(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	credential, err := s.CreateCredential(CreateCredentialInput{AccessToken: "usage-access", RefreshToken: "usage-refresh"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	usedAt := time.Now().UTC().Add(-time.Minute).Truncate(time.Second)
+	s.RecordCredentialUsage(credential.ID, usedAt)
+	if err := s.Close(); err != nil {
+		t.Fatal(err)
+	}
+	s, err = New(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	credential, err = s.GetCredential(credential.ID)
+	if err != nil || credential.LastUsedAt == nil || !credential.LastUsedAt.Equal(usedAt) {
+		t.Fatalf("last_used=%v err=%v", credential.LastUsedAt, err)
+	}
+}
+
 func TestNewRejectsDangerousDataDirs(t *testing.T) {
 	if _, err := New(string(filepath.Separator)); err == nil {
 		t.Fatal("filesystem root must be rejected")

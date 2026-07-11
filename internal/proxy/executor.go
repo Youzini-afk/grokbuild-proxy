@@ -36,11 +36,29 @@ type Store interface {
 	PatchCredential(id string, mutate func(*storage.Credential) error) (storage.Credential, error)
 }
 
+type credentialSnapshotStore interface {
+	CredentialSnapshot() (uint64, []storage.Credential)
+}
+
+type credentialUsageRecorder interface {
+	RecordCredentialUsage(id string, usedAt time.Time)
+}
+
 // Selector is the subset of lb.Selector used by the executor.
 type Selector interface {
 	Pick(creds []storage.Credential, stickyKey string, now time.Time) (storage.Credential, error)
 	MarkSuccess(credID, stickyKey string, now time.Time)
 	MarkFailure(credID string, status int, retryAfter time.Duration, now time.Time)
+}
+
+type cachedSelector interface {
+	SyncCredentials(version uint64, credentials []storage.Credential)
+	PickCached(excluded map[string]struct{}, stickyKey, model string, now time.Time) (storage.Credential, error)
+}
+
+type modelAwareSelector interface {
+	MarkModelFailure(credID, model string, status int, retryAfter time.Duration, now time.Time)
+	MarkModelSuccess(credID, model, stickyKey string, now time.Time)
 }
 
 // Upstream is the subset of upstream.Client used by the executor.
@@ -55,6 +73,10 @@ type Upstream interface {
 type TokenRefresher interface {
 	EnsureAccess(ctx context.Context, key string, current auth.TokenSet, persist auth.TokenPersistFunc) (auth.TokenSet, error)
 	ForceRefresh(ctx context.Context, key string, current auth.TokenSet, persist auth.TokenPersistFunc) (auth.TokenSet, error)
+}
+
+type credentialCachePruner interface {
+	PruneCredentials(keep map[string]struct{})
 }
 
 // Executor selects credentials, refreshes tokens, and posts to upstream /v1/responses.
@@ -72,8 +94,10 @@ type Executor struct {
 	// RequestID extracts a correlation ID from ctx.
 	RequestID func(context.Context) string
 
-	usageMu  sync.Mutex
-	lastUsed map[string]time.Time
+	usageMu         sync.Mutex
+	lastUsed        map[string]time.Time
+	snapshotMu      sync.Mutex
+	snapshotVersion uint64
 }
 
 // Post implements openai.PostResponsesFunc / anthropic.PostResponsesFunc.
@@ -107,21 +131,8 @@ func (e *Executor) Post(ctx context.Context, model, convID string, body []byte, 
 			return nil, err
 		}
 
-		creds, err := e.Store.ListCredentials()
-		if err != nil {
-			return nil, fmt.Errorf("proxy: list credentials: %w", err)
-		}
-		// Exclude already-tried credentials from this request.
-		filtered := make([]storage.Credential, 0, len(creds))
-		for _, c := range creds {
-			if _, ok := tried[c.ID]; ok {
-				continue
-			}
-			filtered = append(filtered, c)
-		}
-
 		now := e.now()
-		cred, err := e.Selector.Pick(filtered, convID, now)
+		cred, err := e.pickCredential(tried, convID, model, now)
 		if err != nil {
 			if lastResp != nil {
 				return lastResp, nil
@@ -154,7 +165,7 @@ func (e *Executor) Post(ctx context.Context, model, convID string, body []byte, 
 					continue
 				}
 			}
-			e.Selector.MarkFailure(cred.ID, http.StatusUnauthorized, 0, e.now())
+			e.markFailure(cred.ID, model, http.StatusUnauthorized, 0, e.now())
 			continue
 		}
 		// Reload after possible token persist so subsequent updates keep latest fields.
@@ -183,7 +194,7 @@ func (e *Executor) Post(ctx context.Context, model, convID string, body []byte, 
 				"attempt", attempt+1,
 				"error", err,
 			)
-			e.Selector.MarkFailure(cred.ID, 0, 0, e.now())
+			e.markFailure(cred.ID, model, 0, 0, e.now())
 			continue
 		}
 
@@ -199,7 +210,7 @@ func (e *Executor) Post(ctx context.Context, model, convID string, body []byte, 
 				"attempt", attempt+1,
 				"upstream_status", resp.StatusCode,
 			)
-			e.Selector.MarkSuccess(cred.ID, convID, e.now())
+			e.markSuccess(cred.ID, model, convID, e.now())
 			_ = e.touchLastUsed(cred)
 			return resp, nil
 		}
@@ -211,7 +222,7 @@ func (e *Executor) Post(ctx context.Context, model, convID string, body []byte, 
 			if rerr != nil {
 				lastErr = rerr
 				lastResp = unauthorizedResp
-				e.Selector.MarkFailure(cred.ID, http.StatusUnauthorized, 0, e.now())
+				e.markFailure(cred.ID, model, http.StatusUnauthorized, 0, e.now())
 				continue
 			}
 			retry, rerr := e.Upstream.PostResponses(ctx, body, upstream.PostResponsesOptions{
@@ -223,11 +234,11 @@ func (e *Executor) Post(ctx context.Context, model, convID string, body []byte, 
 			})
 			if rerr != nil {
 				lastErr = rerr
-				e.Selector.MarkFailure(cred.ID, http.StatusUnauthorized, 0, e.now())
+				e.markFailure(cred.ID, model, http.StatusUnauthorized, 0, e.now())
 				continue
 			}
 			if retry.StatusCode >= 200 && retry.StatusCode < 300 {
-				e.Selector.MarkSuccess(cred.ID, convID, e.now())
+				e.markSuccess(cred.ID, model, convID, e.now())
 				_ = e.touchLastUsed(cred)
 				return retry, nil
 			}
@@ -238,7 +249,10 @@ func (e *Executor) Post(ctx context.Context, model, convID string, body []byte, 
 			ra := parseRetryAfterAt(retry.Header.Get("Retry-After"), e.now())
 			status := retry.StatusCode
 			lastResp = bufferErrorResponse(retry)
-			e.Selector.MarkFailure(cred.ID, status, ra, e.now())
+			if isRegionalModelUnavailable(lastResp) {
+				return lastResp, nil
+			}
+			e.markFailure(cred.ID, model, status, ra, e.now())
 			e.log(ctx, slog.LevelWarn, "upstream_retryable_status",
 				"credential_id", cred.ID,
 				"attempt", attempt+1,
@@ -254,7 +268,10 @@ func (e *Executor) Post(ctx context.Context, model, convID string, body []byte, 
 			ra := parseRetryAfterAt(resp.Header.Get("Retry-After"), e.now())
 			status := resp.StatusCode
 			lastResp = bufferErrorResponse(resp)
-			e.Selector.MarkFailure(cred.ID, status, ra, e.now())
+			if isRegionalModelUnavailable(lastResp) {
+				return lastResp, nil
+			}
+			e.markFailure(cred.ID, model, status, ra, e.now())
 			e.log(ctx, slog.LevelWarn, "upstream_retryable_status",
 				"credential_id", cred.ID,
 				"attempt", attempt+1,
@@ -418,6 +435,10 @@ func (e *Executor) touchLastUsed(cred storage.Credential) error {
 		return nil
 	}
 	now := e.now().UTC().Truncate(time.Second)
+	if recorder, ok := e.Store.(credentialUsageRecorder); ok {
+		recorder.RecordCredentialUsage(cred.ID, now)
+		return nil
+	}
 	e.usageMu.Lock()
 	if e.lastUsed == nil {
 		e.lastUsed = make(map[string]time.Time)
@@ -445,6 +466,65 @@ func (e *Executor) touchLastUsed(cred storage.Credential) error {
 		e.usageMu.Unlock()
 	}
 	return err
+}
+
+func (e *Executor) pickCredential(excluded map[string]struct{}, stickyKey, model string, now time.Time) (storage.Credential, error) {
+	if snapshotStore, ok := e.Store.(credentialSnapshotStore); ok {
+		if selector, fast := e.Selector.(cachedSelector); fast {
+			version, credentials := snapshotStore.CredentialSnapshot()
+			e.pruneCredentialCaches(version, credentials)
+			selector.SyncCredentials(version, credentials)
+			return selector.PickCached(excluded, stickyKey, model, now)
+		}
+	}
+	credentials, err := e.Store.ListCredentials()
+	if err != nil {
+		return storage.Credential{}, fmt.Errorf("proxy: list credentials: %w", err)
+	}
+	filtered := make([]storage.Credential, 0, len(credentials))
+	for _, credential := range credentials {
+		if _, tried := excluded[credential.ID]; !tried {
+			filtered = append(filtered, credential)
+		}
+	}
+	return e.Selector.Pick(filtered, stickyKey, now)
+}
+
+func (e *Executor) pruneCredentialCaches(version uint64, credentials []storage.Credential) {
+	e.snapshotMu.Lock()
+	if version == e.snapshotVersion {
+		e.snapshotMu.Unlock()
+		return
+	}
+	e.snapshotVersion = version
+	e.snapshotMu.Unlock()
+	pruner, ok := e.Refresher.(credentialCachePruner)
+	if !ok {
+		return
+	}
+	keep := make(map[string]struct{}, len(credentials))
+	for _, credential := range credentials {
+		keep[credential.ID] = struct{}{}
+	}
+	pruner.PruneCredentials(keep)
+}
+
+func (e *Executor) markFailure(credID, model string, status int, retryAfter time.Duration, now time.Time) {
+	if status == http.StatusForbidden {
+		if selector, ok := e.Selector.(modelAwareSelector); ok {
+			selector.MarkModelFailure(credID, model, status, retryAfter, now)
+			return
+		}
+	}
+	e.Selector.MarkFailure(credID, status, retryAfter, now)
+}
+
+func (e *Executor) markSuccess(credID, model, stickyKey string, now time.Time) {
+	if selector, ok := e.Selector.(modelAwareSelector); ok {
+		selector.MarkModelSuccess(credID, model, stickyKey, now)
+		return
+	}
+	e.Selector.MarkSuccess(credID, stickyKey, now)
 }
 
 func (e *Executor) now() time.Time {
@@ -528,6 +608,18 @@ func bufferErrorResponse(resp *http.Response) *http.Response {
 	clone.Body = io.NopCloser(strings.NewReader(string(raw)))
 	clone.ContentLength = int64(len(raw))
 	return clone
+}
+
+func isRegionalModelUnavailable(resp *http.Response) bool {
+	if resp == nil || resp.StatusCode != http.StatusForbidden || resp.Body == nil {
+		return false
+	}
+	raw, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	_ = resp.Body.Close()
+	resp.Body = io.NopCloser(strings.NewReader(string(raw)))
+	message := strings.ToLower(string(raw))
+	return strings.Contains(message, "not available in your region") ||
+		strings.Contains(message, "unavailable in your region")
 }
 
 // DrainAndClose is a helper for callers that abandon a response.
