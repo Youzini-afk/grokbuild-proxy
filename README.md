@@ -37,7 +37,7 @@ OpenAI 兼容客户端。
 - Summarized / Omitted Thinking Block
 - 工具轮次间的加密 Reasoning 回放
 - 多账号选择、会话粘滞、冷却和故障切换
-- Grok CLI 凭据导入和浏览器 OAuth Device Login
+- Grok CLI / CPA / sub2api JSON 与 ZIP 凭据导入，以及浏览器 OAuth Device Login
 - SQLite WAL 事务存储，支持旧 JSON 自动迁移和大规模账号池
 - CPA 风格调用统计：全局趋势、成功率、模型分布及账号最近调用点阵
 - 可持久化运行设置 UI：重试、负载均衡、冷却、刷新、请求限制、日志和 Metrics 访问控制

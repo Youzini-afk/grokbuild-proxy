@@ -33,7 +33,7 @@ thinking blocks, encrypted reasoning replay, and Grok-hosted web search.
 - Adaptive/manual reasoning-effort compatibility
 - Summarized/omitted thinking and encrypted reasoning replay
 - Multi-account selection, sticky sessions, cooldown, and failover
-- Grok CLI import and browser OAuth device login
+- Grok CLI, CPA, and sub2api JSON/ZIP credential import plus browser OAuth device login
 - Transactional SQLite WAL storage with automatic legacy JSON migration
 - CPA-style usage dashboard with global trends and per-account outcome timelines
 - Durable live settings UI for retries, load balancing, cooldowns, refresh,

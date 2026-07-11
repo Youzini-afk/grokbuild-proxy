@@ -1,6 +1,7 @@
 package admin
 
 import (
+	"archive/zip"
 	"bytes"
 	"context"
 	"encoding/base64"
@@ -324,6 +325,69 @@ func TestImportGrokMultipartJSONFile(t *testing.T) {
 	}
 	if response["imported"] != float64(2) || response["created"] != float64(2) {
 		t.Fatalf("response=%v", response)
+	}
+}
+
+func TestImportGrokMultipartCPAAndSub2APIZIP(t *testing.T) {
+	store, err := storage.New(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	h := &Handlers{Store: store, MaxBody: 1 << 20}
+
+	var archive bytes.Buffer
+	zipWriter := zip.NewWriter(&archive)
+	files := map[string]string{
+		"cpa.json":     `{"type":"xai","access_token":"cpa-access","refresh_token":"cpa-refresh","sub":"cpa-user","expired":"2026-07-12T12:00:00Z","disabled":true}`,
+		"sub2api.json": `{"accounts":[{"name":"sub-account","platform":"grok","type":"oauth","priority":250,"credentials":{"type":"xai","access_token":"sub-access","refresh_token":"sub-refresh","sub":"sub-user","expired":"2026-07-12T12:00:00Z"}}]}`,
+	}
+	for name, content := range files {
+		entry, createErr := zipWriter.Create(name)
+		if createErr != nil {
+			t.Fatal(createErr)
+		}
+		if _, writeErr := entry.Write([]byte(content)); writeErr != nil {
+			t.Fatal(writeErr)
+		}
+	}
+	if err := zipWriter.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	var body bytes.Buffer
+	writer := multipart.NewWriter(&body)
+	part, err := writer.CreateFormFile("file", "mixed-credentials.zip")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = part.Write(archive.Bytes()); err != nil {
+		t.Fatal(err)
+	}
+	if err = writer.Close(); err != nil {
+		t.Fatal(err)
+	}
+	req := httptest.NewRequest(http.MethodPost, "/admin/credentials/import-grok", &body)
+	req.Header.Set("Content-Type", writer.FormDataContentType())
+	rr := httptest.NewRecorder()
+	h.ImportGrok(rr, req)
+	if rr.Code != http.StatusCreated {
+		t.Fatalf("status=%d body=%s", rr.Code, rr.Body.String())
+	}
+
+	credentials, err := store.ListCredentials()
+	if err != nil || len(credentials) != 2 {
+		t.Fatalf("credentials=%d err=%v", len(credentials), err)
+	}
+	byUser := map[string]storage.Credential{}
+	for _, credential := range credentials {
+		byUser[credential.UserID] = credential
+	}
+	if byUser["cpa-user"].Enabled {
+		t.Fatalf("CPA disabled state was not preserved: %+v", byUser["cpa-user"])
+	}
+	if byUser["sub-user"].Name != "sub-account" || byUser["sub-user"].Priority != 250 {
+		t.Fatalf("sub2api metadata was not preserved: %+v", byUser["sub-user"])
 	}
 }
 

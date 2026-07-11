@@ -24,6 +24,23 @@ stored in the statistics tables. Events are queued in memory and committed in
 one-second SQLite batches; the newest 100,000 detailed events are retained while
 per-credential lifetime totals remain in `credential_usage_stats`.
 
+## Credential imports
+
+The Admin credential page auto-detects canonical Grok auth JSON, CPA `type=xai`
+OAuth JSON, and sub2api `accounts[].credentials` exports. A JSON file may hold a
+single credential, an array, or a multi-account wrapper. ZIP uploads may contain
+multiple JSON files or nested ZIP batches; archives are parsed in memory and are
+never extracted to the data directory. macOS metadata and unrelated text/CSV
+files are ignored.
+
+ZIP nesting is limited to three levels, supported-file count to 20,000, and
+total uncompressed JSON to `limits.max_import_bytes`. Invalid, encrypted, or
+oversized archives fail before credentials are written. During normalization,
+JWT claims fill missing account metadata, CPA/sub2api disabled and priority
+values are preserved, and duplicate account rotations keep the credential with
+the newest expiry. Raw SSO cookies are intentionally rejected because they must
+first be exchanged through the OAuth flow.
+
 ## Runtime settings
 
 The Admin **Runtime Settings** page persists validated overrides in SQLite and

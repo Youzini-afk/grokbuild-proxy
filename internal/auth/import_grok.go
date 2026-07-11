@@ -1,13 +1,22 @@
 package auth
 
 import (
+	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 )
+
+// ErrNoSupportedCredential identifies a valid JSON document that contains no
+// Grok/xAI credential. Bundle imports may safely skip these files.
+var ErrNoSupportedCredential = errors.New("no supported Grok/CPA/sub2api credential entries")
+
+var ErrRawSSORequiresExchange = errors.New("raw SSO cookies require OAuth exchange before import")
 
 // GrokAuthEntry is one credential entry inside ~/.grok/auth.json.
 // The CLI stores entries keyed by "https://auth.x.ai::<client_id>".
@@ -43,7 +52,31 @@ type ImportedCredential struct {
 	OIDCIssuer   string
 	OIDCClientID string
 	AuthMode     string
+	Name         string
+	Enabled      *bool
+	Priority     *int
 	Raw          GrokAuthEntry
+}
+
+// cpaAuthEntry is the common CPA/sub2api xAI OAuth credential shape.
+type cpaAuthEntry struct {
+	Type          string `json:"type"`
+	AccessToken   string `json:"access_token"`
+	RefreshToken  string `json:"refresh_token"`
+	IDToken       string `json:"id_token"`
+	AuthKind      string `json:"auth_kind"`
+	LastRefresh   string `json:"last_refresh"`
+	Expired       string `json:"expired"`
+	ExpiresAt     string `json:"expires_at"`
+	Email         string `json:"email"`
+	Sub           string `json:"sub"`
+	UserID        string `json:"user_id"`
+	TeamID        string `json:"team_id"`
+	PrincipalID   string `json:"principal_id"`
+	PrincipalType string `json:"principal_type"`
+	OIDCIssuer    string `json:"oidc_issuer"`
+	OIDCClientID  string `json:"oidc_client_id"`
+	Disabled      *bool  `json:"disabled"`
 }
 
 // DefaultGrokAuthPath returns ~/.grok/auth.json.
@@ -151,85 +184,366 @@ func ImportGrokAuthFile(path string, extraRoots ...string) ([]ImportedCredential
 	return ParseGrokAuthJSON(data)
 }
 
-// ParseGrokAuthJSON parses the Grok CLI auth.json document.
-//
-// Accepted shapes:
-//  1. Map keyed by "issuer::client_id" → entry (canonical CLI shape)
-//  2. Single entry object with key/refresh_token fields
-//  3. {"accounts":[...]} or {"credentials":[...]} arrays of entries
+// ParseGrokAuthJSON parses canonical Grok auth, CPA type=xai, and sub2api
+// credential documents. Arrays and accounts[].credentials wrappers are
+// accepted and normalized into one credential representation.
 func ParseGrokAuthJSON(data []byte) ([]ImportedCredential, error) {
 	data = bytesTrimSpace(data)
 	if len(data) == 0 {
 		return nil, fmt.Errorf("import grok auth: empty document")
 	}
-
-	// Shape 1: map of entries.
-	var asMap map[string]json.RawMessage
-	if err := json.Unmarshal(data, &asMap); err == nil && looksLikeAuthMap(asMap) {
-		out := make([]ImportedCredential, 0, len(asMap))
-		for k, raw := range asMap {
-			// Skip non-entry top-level keys if mixed.
-			var entry GrokAuthEntry
-			if err := json.Unmarshal(raw, &entry); err != nil {
-				continue
-			}
-			if strings.TrimSpace(entry.Key) == "" && strings.TrimSpace(entry.RefreshToken) == "" {
-				continue
-			}
-			cred, err := normalizeEntry(k, entry)
-			if err != nil {
-				return nil, err
-			}
-			out = append(out, cred)
-		}
-		if len(out) == 0 {
-			return nil, fmt.Errorf("import grok auth: no credential entries found")
-		}
-		return out, nil
-	}
-
-	// Shape 3: wrapper with arrays.
-	var wrapper struct {
-		Accounts    []GrokAuthEntry `json:"accounts"`
-		Credentials []GrokAuthEntry `json:"credentials"`
-	}
-	if err := json.Unmarshal(data, &wrapper); err == nil {
-		entries := wrapper.Accounts
-		if len(entries) == 0 {
-			entries = wrapper.Credentials
-		}
-		if len(entries) > 0 {
-			out := make([]ImportedCredential, 0, len(entries))
-			for i, entry := range entries {
-				cred, err := normalizeEntry(fmt.Sprintf("entry[%d]", i), entry)
-				if err != nil {
-					return nil, err
-				}
-				// Array positions repeat in every import document and therefore are
-				// labels, not stable account identities. Persisting entry[0], entry[1],
-				// ... as source keys can overwrite unrelated accounts in later batches.
-				cred.SourceKey = ""
-				out = append(out, cred)
-			}
-			return out, nil
-		}
-	}
-
-	// Shape 2: bare entry.
-	var entry GrokAuthEntry
-	if err := json.Unmarshal(data, &entry); err != nil {
+	var document any
+	if err := json.Unmarshal(data, &document); err != nil {
 		return nil, fmt.Errorf("import grok auth: parse: %w", err)
 	}
-	if strings.TrimSpace(entry.Key) == "" && strings.TrimSpace(entry.RefreshToken) == "" {
-		return nil, fmt.Errorf("import grok auth: missing key/refresh_token")
-	}
-	cred, err := normalizeEntry("default", entry)
+	out, err := parseCredentialNode(document, "", true)
 	if err != nil {
 		return nil, err
 	}
-	// "default" is shared by every bare-entry document and is not an identity.
-	cred.SourceKey = ""
-	return []ImportedCredential{cred}, nil
+	if len(out) == 0 {
+		if root, ok := document.(map[string]any); ok {
+			if _, rawSSO := root["ssoBasic"]; rawSSO {
+				return nil, fmt.Errorf("import grok auth: %w", ErrRawSSORequiresExchange)
+			}
+		}
+		return nil, fmt.Errorf("import grok auth: %w", ErrNoSupportedCredential)
+	}
+	return DeduplicateImportedCredentials(out), nil
+}
+
+func parseCredentialNode(node any, sourceKey string, root bool) ([]ImportedCredential, error) {
+	switch value := node.(type) {
+	case []any:
+		out := make([]ImportedCredential, 0, len(value))
+		for _, item := range value {
+			parsed, err := parseCredentialNode(item, "", false)
+			if err != nil {
+				return nil, err
+			}
+			out = append(out, parsed...)
+		}
+		return out, nil
+	case map[string]any:
+		raw, err := json.Marshal(value)
+		if err != nil {
+			return nil, fmt.Errorf("import grok auth: normalize object: %w", err)
+		}
+		_, hasAccessToken := value["access_token"]
+		if hasAccessToken || strings.EqualFold(stringValue(value["type"]), "xai") {
+			credential, supported, normalizeErr := normalizeCPAEntry(raw)
+			if normalizeErr != nil {
+				return nil, normalizeErr
+			}
+			if supported {
+				credential.SourceKey = sourceKey
+				return []ImportedCredential{credential}, nil
+			}
+		}
+		_, hasKey := value["key"]
+		_, hasRefreshToken := value["refresh_token"]
+		if hasKey || (hasRefreshToken && !hasAccessToken) {
+			var entry GrokAuthEntry
+			if err := json.Unmarshal(raw, &entry); err != nil {
+				return nil, fmt.Errorf("import grok auth: entry decode: %w", err)
+			}
+			credential, normalizeErr := normalizeEntry(sourceKey, entry)
+			if normalizeErr != nil {
+				return nil, normalizeErr
+			}
+			return []ImportedCredential{credential}, nil
+		}
+		if accounts, ok := value["accounts"]; ok {
+			parsed, parseErr := parseCredentialNode(accounts, "", false)
+			if parseErr != nil {
+				return nil, parseErr
+			}
+			if len(parsed) > 0 {
+				return parsed, nil
+			}
+		}
+		if nested, ok := value["credentials"]; ok {
+			platform := strings.ToLower(strings.TrimSpace(stringValue(value["platform"])))
+			if platform != "" && platform != "grok" && platform != "xai" {
+				return nil, nil
+			}
+			parsed, parseErr := parseCredentialNode(nested, "", false)
+			if parseErr != nil {
+				return nil, parseErr
+			}
+			applySub2APIAccountMetadata(parsed, value)
+			return parsed, nil
+		}
+		out := make([]ImportedCredential, 0, len(value))
+		keys := make([]string, 0, len(value))
+		for key := range value {
+			keys = append(keys, key)
+		}
+		sort.Strings(keys)
+		for _, key := range keys {
+			child := value[key]
+			parsed, parseErr := parseCredentialNode(child, key, false)
+			if parseErr != nil {
+				return nil, parseErr
+			}
+			out = append(out, parsed...)
+		}
+		if root && len(out) == 1 && out[0].SourceKey == "default" {
+			out[0].SourceKey = ""
+		}
+		return out, nil
+	default:
+		return nil, nil
+	}
+}
+
+func normalizeCPAEntry(raw []byte) (ImportedCredential, bool, error) {
+	var entry cpaAuthEntry
+	if err := json.Unmarshal(raw, &entry); err != nil {
+		return ImportedCredential{}, false, fmt.Errorf("import grok auth: CPA entry decode: %w", err)
+	}
+	provider := strings.ToLower(strings.TrimSpace(entry.Type))
+	if provider != "" && provider != "xai" && provider != "grok" {
+		return ImportedCredential{}, false, nil
+	}
+	access := strings.TrimSpace(entry.AccessToken)
+	refresh := strings.TrimSpace(entry.RefreshToken)
+	if access == "" && refresh == "" {
+		return ImportedCredential{}, false, nil
+	}
+	claims := tokenMetadataClaims(entry.IDToken, access)
+	expiresAt, err := cpaExpiry(entry, claims)
+	if err != nil {
+		return ImportedCredential{}, false, err
+	}
+	userID := firstNonEmpty(strings.TrimSpace(entry.Sub), strings.TrimSpace(entry.UserID), firstMetadataClaim(claims, "sub", "user_id", "principal_id"))
+	email := firstNonEmpty(strings.TrimSpace(entry.Email), firstMetadataClaim(claims, "email"))
+	teamID := firstNonEmpty(strings.TrimSpace(entry.TeamID), firstMetadataClaim(claims, "team_id"))
+	principalID := firstNonEmpty(strings.TrimSpace(entry.PrincipalID), firstMetadataClaim(claims, "principal_id"), userID)
+	principalType := firstNonEmpty(strings.TrimSpace(entry.PrincipalType), firstMetadataClaim(claims, "principal_type"), "User")
+	issuer := firstNonEmpty(strings.TrimSpace(entry.OIDCIssuer), Issuer)
+	clientID := firstNonEmpty(strings.TrimSpace(entry.OIDCClientID), DefaultClientID)
+	var enabled *bool
+	if entry.Disabled != nil {
+		value := !*entry.Disabled
+		enabled = &value
+	}
+	return ImportedCredential{
+		AccessToken: access, RefreshToken: refresh, ExpiresAt: expiresAt,
+		Email: email, UserID: userID, TeamID: teamID,
+		OIDCIssuer: issuer, OIDCClientID: clientID,
+		AuthMode: firstNonEmpty(strings.TrimSpace(entry.AuthKind), "oidc"),
+		Enabled:  enabled,
+		Raw: GrokAuthEntry{
+			Key: access, AuthMode: "oidc", CreateTime: strings.TrimSpace(entry.LastRefresh),
+			UserID: userID, Email: email, PrincipalID: principalID, PrincipalType: principalType,
+			TeamID: teamID, RefreshToken: refresh, ExpiresAt: formatOptionalTime(expiresAt),
+			OIDCIssuer: issuer, OIDCClientID: clientID,
+		},
+	}, true, nil
+}
+
+func cpaExpiry(entry cpaAuthEntry, claims map[string]any) (time.Time, error) {
+	value := firstNonEmpty(strings.TrimSpace(entry.Expired), strings.TrimSpace(entry.ExpiresAt))
+	if value != "" {
+		if parsed, err := parseFlexibleTime(value); err == nil {
+			return parsed, nil
+		} else if claimTime := numericDateClaim(claims, "exp"); !claimTime.IsZero() {
+			return claimTime, nil
+		} else {
+			return time.Time{}, fmt.Errorf("import grok auth: CPA expires_at: %w", err)
+		}
+	}
+	return numericDateClaim(claims, "exp"), nil
+}
+
+func applySub2APIAccountMetadata(credentials []ImportedCredential, account map[string]any) {
+	name := strings.TrimSpace(stringValue(account["name"]))
+	priority, hasPriority := intValue(account["priority"])
+	disabled, hasDisabled := boolValue(account["disabled"])
+	for i := range credentials {
+		if credentials[i].Name == "" {
+			credentials[i].Name = name
+		}
+		if hasPriority {
+			value := priority
+			credentials[i].Priority = &value
+		}
+		if hasDisabled && credentials[i].Enabled == nil {
+			value := !disabled
+			credentials[i].Enabled = &value
+		}
+	}
+}
+
+func tokenMetadataClaims(tokens ...string) map[string]any {
+	claims := make(map[string]any)
+	for _, token := range tokens {
+		parts := strings.Split(strings.TrimSpace(token), ".")
+		if len(parts) < 2 {
+			continue
+		}
+		payload, err := base64.RawURLEncoding.DecodeString(strings.TrimRight(parts[1], "="))
+		if err != nil {
+			continue
+		}
+		var current map[string]any
+		if json.Unmarshal(payload, &current) != nil {
+			continue
+		}
+		for key, value := range current {
+			claims[key] = value
+		}
+	}
+	return claims
+}
+
+func firstMetadataClaim(claims map[string]any, keys ...string) string {
+	for _, key := range keys {
+		if value, ok := claims[key].(string); ok && strings.TrimSpace(value) != "" {
+			return strings.TrimSpace(value)
+		}
+	}
+	return ""
+}
+
+func numericDateClaim(claims map[string]any, key string) time.Time {
+	var seconds float64
+	switch value := claims[key].(type) {
+	case float64:
+		seconds = value
+	case json.Number:
+		seconds, _ = value.Float64()
+	case int64:
+		seconds = float64(value)
+	case int:
+		seconds = float64(value)
+	}
+	if seconds <= 0 {
+		return time.Time{}
+	}
+	whole := int64(seconds)
+	nanos := int64((seconds - float64(whole)) * float64(time.Second))
+	return time.Unix(whole, nanos).UTC()
+}
+
+func formatOptionalTime(value time.Time) string {
+	if value.IsZero() {
+		return ""
+	}
+	return value.UTC().Format(time.RFC3339Nano)
+}
+
+func stringValue(value any) string {
+	text, _ := value.(string)
+	return text
+}
+
+func intValue(value any) (int, bool) {
+	switch number := value.(type) {
+	case float64:
+		return int(number), number == float64(int(number))
+	case int:
+		return number, true
+	case json.Number:
+		parsed, err := number.Int64()
+		return int(parsed), err == nil
+	default:
+		return 0, false
+	}
+}
+
+func boolValue(value any) (bool, bool) {
+	boolean, ok := value.(bool)
+	return boolean, ok
+}
+
+// DeduplicateImportedCredentials keeps the newest token rotation for each
+// stable account identity. It deliberately does not use array positions or
+// generic canonical map keys as cross-document identities.
+func DeduplicateImportedCredentials(credentials []ImportedCredential) []ImportedCredential {
+	out := make([]ImportedCredential, 0, len(credentials))
+	indexes := make(map[string]int, len(credentials))
+	for _, credential := range credentials {
+		identity := importedCredentialIdentity(credential)
+		if identity == "" {
+			out = append(out, credential)
+			continue
+		}
+		index, exists := indexes[identity]
+		if !exists {
+			indexes[identity] = len(out)
+			out = append(out, credential)
+			continue
+		}
+		if preferImportedCredential(out[index], credential) {
+			credential = mergeImportedMetadata(credential, out[index])
+			out[index] = credential
+		} else {
+			out[index] = mergeImportedMetadata(out[index], credential)
+		}
+	}
+	return out
+}
+
+func importedCredentialIdentity(credential ImportedCredential) string {
+	if credential.UserID != "" {
+		identity := "user:" + credential.UserID
+		if credential.TeamID != "" {
+			identity += "\x00team:" + credential.TeamID
+		}
+		return identity
+	}
+	if credential.Email != "" {
+		return "email:" + strings.ToLower(credential.Email) + "\x00client:" + credential.OIDCClientID
+	}
+	if credential.RefreshToken != "" {
+		return "refresh:" + credential.RefreshToken
+	}
+	if credential.AccessToken != "" {
+		return "access:" + credential.AccessToken
+	}
+	return ""
+}
+
+func preferImportedCredential(existing, candidate ImportedCredential) bool {
+	if existing.ExpiresAt.IsZero() != candidate.ExpiresAt.IsZero() {
+		return !candidate.ExpiresAt.IsZero()
+	}
+	if !candidate.ExpiresAt.Equal(existing.ExpiresAt) {
+		return candidate.ExpiresAt.After(existing.ExpiresAt)
+	}
+	existingRefresh := importedCredentialRefreshTime(existing)
+	candidateRefresh := importedCredentialRefreshTime(candidate)
+	if !candidateRefresh.Equal(existingRefresh) {
+		return candidateRefresh.After(existingRefresh)
+	}
+	return existing.RefreshToken == "" && candidate.RefreshToken != ""
+}
+
+func importedCredentialRefreshTime(credential ImportedCredential) time.Time {
+	if value := strings.TrimSpace(credential.Raw.CreateTime); value != "" {
+		if parsed, err := parseFlexibleTime(value); err == nil {
+			return parsed
+		}
+	}
+	return time.Time{}
+}
+
+func mergeImportedMetadata(primary, fallback ImportedCredential) ImportedCredential {
+	primary.Name = firstNonEmpty(primary.Name, fallback.Name)
+	primary.Email = firstNonEmpty(primary.Email, fallback.Email)
+	primary.UserID = firstNonEmpty(primary.UserID, fallback.UserID)
+	primary.TeamID = firstNonEmpty(primary.TeamID, fallback.TeamID)
+	primary.OIDCIssuer = firstNonEmpty(primary.OIDCIssuer, fallback.OIDCIssuer)
+	primary.OIDCClientID = firstNonEmpty(primary.OIDCClientID, fallback.OIDCClientID)
+	primary.AuthMode = firstNonEmpty(primary.AuthMode, fallback.AuthMode)
+	if primary.Enabled == nil {
+		primary.Enabled = fallback.Enabled
+	}
+	if primary.Priority == nil {
+		primary.Priority = fallback.Priority
+	}
+	return primary
 }
 
 // ToTokenSet converts an imported credential into a TokenSet.
@@ -248,13 +562,21 @@ func normalizeEntry(sourceKey string, entry GrokAuthEntry) (ImportedCredential, 
 	if access == "" && refresh == "" {
 		return ImportedCredential{}, fmt.Errorf("import grok auth: entry %q has no tokens", sourceKey)
 	}
+	claims := tokenMetadataClaims(access)
 	var exp time.Time
 	if strings.TrimSpace(entry.ExpiresAt) != "" {
 		t, err := parseFlexibleTime(entry.ExpiresAt)
 		if err != nil {
-			return ImportedCredential{}, fmt.Errorf("import grok auth: entry %q expires_at: %w", sourceKey, err)
+			if claimTime := numericDateClaim(claims, "exp"); !claimTime.IsZero() {
+				exp = claimTime
+			} else {
+				return ImportedCredential{}, fmt.Errorf("import grok auth: entry %q expires_at: %w", sourceKey, err)
+			}
+		} else {
+			exp = t
 		}
-		exp = t
+	} else {
+		exp = numericDateClaim(claims, "exp")
 	}
 	clientID := strings.TrimSpace(entry.OIDCClientID)
 	issuer := strings.TrimSpace(entry.OIDCIssuer)
@@ -275,14 +597,17 @@ func normalizeEntry(sourceKey string, entry GrokAuthEntry) (ImportedCredential, 
 	if clientID == "" {
 		clientID = DefaultClientID
 	}
+	userID := firstNonEmpty(strings.TrimSpace(entry.UserID), strings.TrimSpace(entry.PrincipalID), firstMetadataClaim(claims, "sub", "user_id", "principal_id"))
+	email := firstNonEmpty(strings.TrimSpace(entry.Email), firstMetadataClaim(claims, "email"))
+	teamID := firstNonEmpty(strings.TrimSpace(entry.TeamID), firstMetadataClaim(claims, "team_id"))
 	return ImportedCredential{
 		SourceKey:    sourceKey,
 		AccessToken:  access,
 		RefreshToken: refresh,
 		ExpiresAt:    exp,
-		Email:        strings.TrimSpace(entry.Email),
-		UserID:       firstNonEmpty(strings.TrimSpace(entry.UserID), strings.TrimSpace(entry.PrincipalID)),
-		TeamID:       strings.TrimSpace(entry.TeamID),
+		Email:        email,
+		UserID:       userID,
+		TeamID:       teamID,
 		OIDCIssuer:   issuer,
 		OIDCClientID: clientID,
 		AuthMode:     strings.TrimSpace(entry.AuthMode),
@@ -290,30 +615,10 @@ func normalizeEntry(sourceKey string, entry GrokAuthEntry) (ImportedCredential, 
 	}, nil
 }
 
-func looksLikeAuthMap(m map[string]json.RawMessage) bool {
-	if len(m) == 0 {
-		return false
-	}
-	// Prefer keys that look like issuer::client_id, or values that look like entries.
-	for k, raw := range m {
-		if strings.Contains(k, "::") {
-			return true
-		}
-		var probe struct {
-			Key          string `json:"key"`
-			RefreshToken string `json:"refresh_token"`
-		}
-		if json.Unmarshal(raw, &probe) == nil && (probe.Key != "" || probe.RefreshToken != "") {
-			return true
-		}
-	}
-	return false
-}
-
 func splitSourceKey(key string) (issuer, clientID string, ok bool) {
-	// Format: https://auth.x.ai::b1a00492-073a-47ea-816f-4c329264a828
-	parts := strings.SplitN(key, "::", 2)
-	if len(parts) != 2 {
+	// Optional suffixes after client id identify an account in merged exports.
+	parts := strings.Split(key, "::")
+	if len(parts) < 2 {
 		return "", "", false
 	}
 	issuer = strings.TrimSpace(parts[0])

@@ -121,7 +121,7 @@ func TestParseGrokAuthJSON_ArrayPositionsAreNotSourceIdentities(t *testing.T) {
 
 func TestParseGrokAuthJSON_SourceKeyFallback(t *testing.T) {
 	raw := `{
-  "https://auth.x.ai::custom-client-id": {
+  "https://auth.x.ai::custom-client-id::user-suffix": {
     "key": "k",
     "refresh_token": "r"
   }

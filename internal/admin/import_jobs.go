@@ -48,7 +48,10 @@ type ImportJob struct {
 func (h *Handlers) persistImported(imported []auth.ImportedCredential) (importOutcome, error) {
 	inputs := make([]storage.CreateCredentialInput, 0, len(imported))
 	for _, credential := range imported {
-		name := credential.Email
+		name := credential.Name
+		if name == "" {
+			name = credential.Email
+		}
 		if name == "" {
 			name = credential.SourceKey
 		}
@@ -56,6 +59,7 @@ func (h *Handlers) persistImported(imported []auth.ImportedCredential) (importOu
 			Name: name, Email: credential.Email, UserID: credential.UserID, TeamID: credential.TeamID,
 			SourceKey: credential.SourceKey, OIDCClientID: credential.OIDCClientID,
 			AccessToken: credential.AccessToken, RefreshToken: credential.RefreshToken, ExpiresAt: credential.ExpiresAt,
+			Enabled: credential.Enabled, Priority: credential.Priority,
 		})
 	}
 	outcome := importOutcome{Results: make([]map[string]any, 0, min(len(imported), 100))}

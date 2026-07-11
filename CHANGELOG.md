@@ -27,6 +27,8 @@ Versioning and keeps the latest release under GitHub Releases.
 - Semantic credential health scheduling with class-specific adaptive backoff,
   durable abnormal/quota states, single-flight half-open recovery probes, and
   live Admin UI controls.
+- Automatic Grok, CPA type=xai, and sub2api credential import from JSON or
+  bounded in-memory ZIP bundles, including nested export ZIPs.
 
 ### Changed
 
@@ -36,6 +38,8 @@ Versioning and keeps the latest release under GitHub Releases.
 - Regional model errors no longer consume multiple credential attempts.
 - Credential selection uses a compact quarantine index so scheduled recovery
   probes do not scan healthy accounts in large pools.
+- Credential imports normalize JWT metadata, preserve CPA/sub2api disabled and
+  priority fields, and keep the newest token rotation per stable account.
 - API/admin/data-directory settings can be supplied through `API_KEY`,
   `ADMIN_KEY`, and `DATA_DIR`.
 - Prometheus metrics require Admin Bearer authentication by default and can be

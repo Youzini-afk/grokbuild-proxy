@@ -438,13 +438,19 @@ func (h *Handlers) ImportGrok(w http.ResponseWriter, r *http.Request) {
 		Path string          `json:"path"`
 		Raw  json.RawMessage `json:"raw"`
 	}
+	var imported []auth.ImportedCredential
+	var err error
 	if strings.HasPrefix(strings.ToLower(strings.TrimSpace(r.Header.Get("Content-Type"))), "multipart/form-data") {
-		raw, err := readMultipartJSONFile(w, r, h.maxImportBody())
+		name, raw, uploadErr := readMultipartCredentialFile(w, r, h.maxImportBody())
+		if uploadErr != nil {
+			writeErr(w, http.StatusBadRequest, uploadErr.Error())
+			return
+		}
+		imported, err = auth.ParseCredentialBundle(name, raw, h.maxImportBody())
 		if err != nil {
 			writeErr(w, http.StatusBadRequest, err.Error())
 			return
 		}
-		body.Raw = raw
 	} else {
 		// Body is optional; empty body → default path. Malformed JSON is 400 (not silent fallback).
 		if err := decodeJSON(r, h.maxImportBody(), &body); err != nil {
@@ -453,11 +459,9 @@ func (h *Handlers) ImportGrok(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	var imported []auth.ImportedCredential
-	var err error
-	if len(body.Raw) > 0 {
+	if imported == nil && len(body.Raw) > 0 {
 		imported, err = auth.ParseGrokAuthJSON(body.Raw)
-	} else {
+	} else if imported == nil {
 		path := strings.TrimSpace(body.Path)
 		var extraRoots []string
 		if h != nil && strings.TrimSpace(h.Config.DataDir) != "" {
@@ -483,17 +487,17 @@ func (h *Handlers) ImportGrok(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, outcome.httpStatus(), outcome)
 }
 
-func readMultipartJSONFile(w http.ResponseWriter, r *http.Request, max int64) (json.RawMessage, error) {
+func readMultipartCredentialFile(w http.ResponseWriter, r *http.Request, max int64) (string, []byte, error) {
 	if r == nil || r.Body == nil {
-		return nil, fmt.Errorf("missing body")
+		return "", nil, fmt.Errorf("missing body")
 	}
 	if max <= 0 {
-		return nil, fmt.Errorf("invalid upload limit")
+		return "", nil, fmt.Errorf("invalid upload limit")
 	}
 	r.Body = http.MaxBytesReader(w, r.Body, max+(1<<20))
 	reader, err := r.MultipartReader()
 	if err != nil {
-		return nil, fmt.Errorf("invalid multipart upload: %w", err)
+		return "", nil, fmt.Errorf("invalid multipart upload: %w", err)
 	}
 	for {
 		part, nextErr := reader.NextPart()
@@ -501,34 +505,35 @@ func readMultipartJSONFile(w http.ResponseWriter, r *http.Request, max int64) (j
 			break
 		}
 		if nextErr != nil {
-			return nil, fmt.Errorf("invalid multipart upload: %w", nextErr)
+			return "", nil, fmt.Errorf("invalid multipart upload: %w", nextErr)
 		}
 		if part.FormName() != "file" {
 			_ = part.Close()
 			continue
 		}
 		name := strings.TrimSpace(part.FileName())
-		if name == "" || !strings.HasSuffix(strings.ToLower(name), ".json") {
+		lowerName := strings.ToLower(name)
+		if name == "" || (!strings.HasSuffix(lowerName, ".json") && !strings.HasSuffix(lowerName, ".zip")) {
 			_ = part.Close()
-			return nil, fmt.Errorf("uploaded file must be a .json file")
+			return "", nil, fmt.Errorf("uploaded file must be a .json or .zip file")
 		}
 		raw, readErr := io.ReadAll(io.LimitReader(part, max+1))
 		_ = part.Close()
 		if readErr != nil {
-			return nil, fmt.Errorf("read uploaded file: %w", readErr)
+			return "", nil, fmt.Errorf("read uploaded file: %w", readErr)
 		}
 		if int64(len(raw)) > max {
-			return nil, fmt.Errorf("uploaded file too large")
+			return "", nil, fmt.Errorf("uploaded file too large")
 		}
-		if len(strings.TrimSpace(string(raw))) == 0 {
-			return nil, fmt.Errorf("uploaded file is empty")
+		if len(raw) == 0 {
+			return "", nil, fmt.Errorf("uploaded file is empty")
 		}
-		if !json.Valid(raw) {
-			return nil, fmt.Errorf("uploaded file contains invalid json")
+		if strings.HasSuffix(lowerName, ".json") && !json.Valid(raw) {
+			return "", nil, fmt.Errorf("uploaded file contains invalid json")
 		}
-		return json.RawMessage(raw), nil
+		return name, raw, nil
 	}
-	return nil, fmt.Errorf("multipart upload is missing file field")
+	return "", nil, fmt.Errorf("multipart upload is missing file field")
 }
 
 // DisableCredential POST /admin/credentials/{id}/disable

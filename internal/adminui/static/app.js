@@ -998,11 +998,11 @@
       el(
         "p",
         "muted",
-        "粘贴 grok auth JSON。将作为 {\"raw\": <JSON>} 提交到 import-grok。"
+        "粘贴 Grok auth、CPA 或 sub2api JSON，系统会自动识别格式。"
       )
     );
     var ta = el("textarea");
-    ta.placeholder = '{"accounts": ...} 或 auth.json 全文';
+    ta.placeholder = 'Grok auth、CPA type=xai，或 sub2api accounts JSON';
     body.appendChild(ta);
 
     var cancel = el("button", "btn", "取消");
@@ -1041,13 +1041,13 @@
         });
     });
 
-    openModal("导入 Grok JSON", body, [cancel, ok]);
+    openModal("导入凭证 JSON", body, [cancel, ok]);
   }
 
   function importGrokFile(file) {
     if (!file) return;
-    if (!/\.json$/i.test(file.name || "")) {
-      toast("请选择 JSON 文件", "err");
+    if (!/\.(json|zip)$/i.test(file.name || "")) {
+      toast("请选择 JSON 或 ZIP 文件", "err");
       return;
     }
     var button = $("btn-import-file");

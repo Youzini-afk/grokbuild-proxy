@@ -59,6 +59,10 @@ func TestEmbeddedDashboardAssetsPresent(t *testing.T) {
 	if !strings.Contains(string(styles), ".settings-grid-health") {
 		t.Fatal("adaptive health settings styles missing from embedded CSS")
 	}
+	if !strings.Contains(string(index), `accept=".json,.zip`) ||
+		!strings.Contains(string(app), `\.(json|zip)`) {
+		t.Fatal("CPA/sub2api JSON and ZIP import UI is missing")
+	}
 }
 
 func TestIndexHandlerServesHTMLWithoutAuth(t *testing.T) {
