@@ -10,7 +10,9 @@ import (
 // runtimeState is in-process failure / cooldown state for a credential.
 type runtimeState struct {
 	FailureCount           int
+	FailureClass           FailureClass
 	CooldownUntil          time.Time
+	ProbeLeaseUntil        time.Time
 	LastError              string
 	LastSuccessPersistedAt time.Time
 	Version                uint64

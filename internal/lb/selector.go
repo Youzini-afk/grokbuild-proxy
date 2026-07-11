@@ -6,7 +6,6 @@ package lb
 
 import (
 	"errors"
-	"fmt"
 	"sort"
 	"sync"
 	"time"
@@ -36,6 +35,7 @@ type Selector struct {
 	stickyTTL    time.Duration
 	cooldownBase time.Duration
 	cooldownMax  time.Duration
+	adaptive     AdaptiveConfig
 
 	mu        sync.Mutex
 	persistMu sync.Mutex
@@ -55,6 +55,13 @@ type Selector struct {
 	priorityIDs map[int][]string
 	priorities  []int
 	modelStates map[string]map[string]*runtimeState
+	pickCount   uint64
+	probeIndex  int
+	// quarantinedIDs is a compact probe index. Keeping failed accounts out of
+	// the normal pool is cheap; probing must also avoid scanning every healthy
+	// account in pools with tens of thousands of credentials.
+	quarantinedIDs []string
+	quarantinedSet map[string]struct{}
 }
 
 // SetHealthStore enables durable failure/cooldown state. It returns s for
@@ -81,17 +88,29 @@ func New(cfg config.LBConfig) *Selector {
 		max = 3600 * time.Second
 	}
 	return &Selector{
-		strategy:     strategy,
-		stickyTTL:    time.Duration(cfg.StickyTTLSec) * time.Second,
-		cooldownBase: base,
-		cooldownMax:  max,
-		priorityRR:   make(map[int]int),
-		sticky:       make(map[string]stickyBinding),
-		states:       make(map[string]*runtimeState),
-		pool:         make(map[string]storage.Credential),
-		priorityIDs:  make(map[int][]string),
-		modelStates:  make(map[string]map[string]*runtimeState),
+		strategy:       strategy,
+		stickyTTL:      time.Duration(cfg.StickyTTLSec) * time.Second,
+		cooldownBase:   base,
+		cooldownMax:    max,
+		adaptive:       DefaultAdaptiveConfig(),
+		priorityRR:     make(map[int]int),
+		sticky:         make(map[string]stickyBinding),
+		states:         make(map[string]*runtimeState),
+		pool:           make(map[string]storage.Credential),
+		priorityIDs:    make(map[int][]string),
+		modelStates:    make(map[string]map[string]*runtimeState),
+		quarantinedSet: make(map[string]struct{}),
 	}
+}
+
+// ApplyAdaptiveConfig updates semantic backoff and half-open probe behavior.
+func (s *Selector) ApplyAdaptiveConfig(cfg AdaptiveConfig) {
+	if s == nil {
+		return
+	}
+	s.mu.Lock()
+	s.adaptive = normalizeAdaptiveConfig(cfg)
+	s.mu.Unlock()
 }
 
 // ApplyConfig updates scheduling behavior without discarding health state or
@@ -154,6 +173,15 @@ func (s *Selector) SyncCredentials(version uint64, credentials []storage.Credent
 			delete(s.modelStates, id)
 		}
 	}
+	quarantinedIDs := make([]string, 0)
+	quarantinedSet := make(map[string]struct{})
+	for _, id := range order {
+		state := s.states[id]
+		if (state != nil && state.FailureCount > 0) || len(s.modelStates[id]) > 0 {
+			quarantinedIDs = append(quarantinedIDs, id)
+			quarantinedSet[id] = struct{}{}
+		}
+	}
 	for key, binding := range s.sticky {
 		if _, ok := pool[binding.CredID]; !ok {
 			delete(s.sticky, key)
@@ -164,14 +192,28 @@ func (s *Selector) SyncCredentials(version uint64, credentials []storage.Credent
 	s.poolOrder = order
 	s.priorityIDs = groups
 	s.priorities = priorities
+	s.quarantinedIDs = quarantinedIDs
+	s.quarantinedSet = quarantinedSet
+	if len(s.quarantinedIDs) == 0 {
+		s.probeIndex = 0
+	} else {
+		s.probeIndex %= len(s.quarantinedIDs)
+	}
 }
 
 // PickCached selects from the prebuilt in-memory index.
 func (s *Selector) PickCached(excluded map[string]struct{}, stickyKey, model string, now time.Time) (storage.Credential, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	s.pickCount++
+	probeEvery := normalizeAdaptiveConfig(s.adaptive).ProbeEvery
+	if probeEvery > 0 && s.pickCount%probeEvery == 0 {
+		if probe, ok := s.pickCachedProbe(model, excluded, now); ok {
+			return probe, nil
+		}
+	}
 	if stickyKey != "" {
-		if id, ok := s.getSticky(stickyKey, now); ok && s.cachedAvailable(id, model, excluded, now) {
+		if id, ok := s.getSticky(stickyKey, now); ok && s.cachedAvailable(id, model, excluded, now, false) {
 			return s.pool[id], nil
 		}
 	}
@@ -183,6 +225,9 @@ func (s *Selector) PickCached(excluded map[string]struct{}, stickyKey, model str
 		picked, ok = s.pickCachedPriority(model, excluded, now)
 	}
 	if !ok {
+		if probe, probeOK := s.pickCachedProbe(model, excluded, now); probeOK {
+			return probe, nil
+		}
 		return storage.Credential{}, ErrNoCredential
 	}
 	if stickyKey != "" {
@@ -197,7 +242,7 @@ func (s *Selector) pickCachedRoundRobin(model string, excluded map[string]struct
 		idx := s.rrIndex % count
 		s.rrIndex = (idx + 1) % count
 		id := s.poolOrder[idx]
-		if s.cachedAvailable(id, model, excluded, now) {
+		if s.cachedAvailable(id, model, excluded, now, false) {
 			return s.pool[id], true
 		}
 	}
@@ -212,7 +257,7 @@ func (s *Selector) pickCachedPriority(model string, excluded map[string]struct{}
 			idx := s.priorityRR[priority] % count
 			s.priorityRR[priority] = (idx + 1) % count
 			id := group[idx]
-			if s.cachedAvailable(id, model, excluded, now) {
+			if s.cachedAvailable(id, model, excluded, now, false) {
 				return s.pool[id], true
 			}
 		}
@@ -220,7 +265,7 @@ func (s *Selector) pickCachedPriority(model string, excluded map[string]struct{}
 	return storage.Credential{}, false
 }
 
-func (s *Selector) cachedAvailable(id, model string, excluded map[string]struct{}, now time.Time) bool {
+func (s *Selector) cachedAvailable(id, model string, excluded map[string]struct{}, now time.Time, allowProbe bool) bool {
 	if _, skip := excluded[id]; skip {
 		return false
 	}
@@ -228,12 +273,62 @@ func (s *Selector) cachedAvailable(id, model string, excluded map[string]struct{
 	if !ok || !credential.Enabled || s.inCooldown(credential, now) {
 		return false
 	}
+	if state := s.states[id]; state != nil && state.FailureCount > 0 {
+		return allowProbe && !state.ProbeLeaseUntil.After(now)
+	}
 	if states := s.modelStates[id]; states != nil {
-		if state := states[model]; state != nil && state.CooldownUntil.After(now) {
-			return false
+		if state := states[model]; state != nil && state.FailureCount > 0 {
+			if state.CooldownUntil.After(now) {
+				return false
+			}
+			return allowProbe && !state.ProbeLeaseUntil.After(now)
 		}
 	}
 	return true
+}
+
+func (s *Selector) pickCachedProbe(model string, excluded map[string]struct{}, now time.Time) (storage.Credential, bool) {
+	count := len(s.quarantinedIDs)
+	if count == 0 {
+		return storage.Credential{}, false
+	}
+	for n := 0; n < count; n++ {
+		idx := s.probeIndex % count
+		s.probeIndex = (idx + 1) % count
+		id := s.quarantinedIDs[idx]
+		if _, quarantined := s.quarantinedSet[id]; !quarantined {
+			continue
+		}
+		if !s.cachedAvailable(id, model, excluded, now, true) {
+			continue
+		}
+		if !s.leaseProbe(id, model, now) {
+			continue
+		}
+		return s.pool[id], true
+	}
+	return storage.Credential{}, false
+}
+
+func (s *Selector) leaseProbe(id, model string, now time.Time) bool {
+	lease := normalizeAdaptiveConfig(s.adaptive).ProbeLease
+	if state := s.states[id]; state != nil && state.FailureCount > 0 {
+		if state.CooldownUntil.After(now) || state.ProbeLeaseUntil.After(now) {
+			return false
+		}
+		state.ProbeLeaseUntil = now.Add(lease)
+		return true
+	}
+	if states := s.modelStates[id]; states != nil {
+		if state := states[model]; state != nil && state.FailureCount > 0 {
+			if state.CooldownUntil.After(now) || state.ProbeLeaseUntil.After(now) {
+				return false
+			}
+			state.ProbeLeaseUntil = now.Add(lease)
+			return true
+		}
+	}
+	return false
 }
 
 // Available returns credentials that are enabled and not in cooldown (storage fields only).
@@ -257,9 +352,19 @@ func Available(creds []storage.Credential, now time.Time) []storage.Credential {
 func (s *Selector) Pick(creds []storage.Credential, stickyKey string, now time.Time) (storage.Credential, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	s.pickCount++
+	probeEvery := normalizeAdaptiveConfig(s.adaptive).ProbeEvery
+	if probeEvery > 0 && s.pickCount%probeEvery == 0 {
+		if probe, ok := s.pickProbeFromCredentials(creds, now); ok {
+			return probe, nil
+		}
+	}
 
 	avail := s.availableLocked(creds, now)
 	if len(avail) == 0 {
+		if probe, ok := s.pickProbeFromCredentials(creds, now); ok {
+			return probe, nil
+		}
 		return storage.Credential{}, ErrNoCredential
 	}
 
@@ -294,8 +399,11 @@ func (s *Selector) MarkSuccess(credID, stickyKey string, now time.Time) {
 		!st.CooldownUntil.IsZero() ||
 		st.LastError != ""
 	st.FailureCount = 0
+	st.FailureClass = ""
 	st.CooldownUntil = time.Time{}
+	st.ProbeLeaseUntil = time.Time{}
 	st.LastError = ""
+	s.updateQuarantinedLocked(credID)
 
 	if stickyKey != "" {
 		s.bindSticky(stickyKey, credID, now)
@@ -320,22 +428,31 @@ func (s *Selector) MarkSuccess(credID, stickyKey string, now time.Time) {
 // MarkFailure records a failure and applies cooldown based on status.
 // retryAfter is honored for 429 when > 0.
 func (s *Selector) MarkFailure(credID string, status int, retryAfter time.Duration, now time.Time) {
+	s.MarkClassifiedFailure(credID, FailureSignalForStatus(status, retryAfter), now)
+}
+
+// MarkClassifiedFailure applies semantic, class-specific backoff and persists
+// the resulting health state.
+func (s *Selector) MarkClassifiedFailure(credID string, signal FailureSignal, now time.Time) {
 	if credID == "" {
 		return
 	}
+	signal = signal.normalized()
 	s.mu.Lock()
 	st := s.ensureState(credID)
-	st.FailureCount++
-	d := s.cooldownDuration(status, retryAfter, st.FailureCount-1)
-	st.CooldownUntil = now.Add(d)
-	if status > 0 {
-		st.LastError = fmt.Sprintf("http %d", status)
-	} else {
-		st.LastError = "network error"
+	if st.FailureClass != signal.Class {
+		st.FailureCount = 0
 	}
+	st.FailureCount++
+	st.FailureClass = signal.Class
+	d := s.adaptiveCooldown(signal, st.FailureCount)
+	st.CooldownUntil = now.Add(d)
+	st.ProbeLeaseUntil = time.Time{}
+	st.LastError = signal.Label()
+	s.updateQuarantinedLocked(credID)
 
 	// Sticky bindings to a cooling credential should not keep routing traffic there.
-	if status == 401 || status == 402 || status == 403 || status == 429 {
+	if signal.Class == FailureAuth || signal.Class == FailureQuota || signal.Class == FailureRateLimit {
 		s.clearStickyForCred(credID)
 	}
 	failureCount := st.FailureCount
@@ -358,10 +475,15 @@ func (s *Selector) MarkFailure(credID string, status int, retryAfter time.Durati
 // MarkModelFailure cools a credential only for one model. This prevents a
 // model entitlement/availability error from disabling otherwise usable models.
 func (s *Selector) MarkModelFailure(credID, model string, status int, retryAfter time.Duration, now time.Time) {
+	s.MarkModelClassifiedFailure(credID, model, FailureSignal{Class: FailureModel, Status: status, RetryAfter: retryAfter}, now)
+}
+
+func (s *Selector) MarkModelClassifiedFailure(credID, model string, signal FailureSignal, now time.Time) {
 	if credID == "" || model == "" {
-		s.MarkFailure(credID, status, retryAfter, now)
+		s.MarkClassifiedFailure(credID, signal, now)
 		return
 	}
+	signal = signal.normalized()
 	s.mu.Lock()
 	states := s.modelStates[credID]
 	if states == nil {
@@ -373,9 +495,15 @@ func (s *Selector) MarkModelFailure(credID, model string, status int, retryAfter
 		state = &runtimeState{}
 		states[model] = state
 	}
+	if state.FailureClass != signal.Class {
+		state.FailureCount = 0
+	}
 	state.FailureCount++
-	state.CooldownUntil = now.Add(s.cooldownDuration(status, retryAfter, state.FailureCount-1))
-	state.LastError = fmt.Sprintf("http %d", status)
+	state.FailureClass = signal.Class
+	state.CooldownUntil = now.Add(s.adaptiveCooldown(signal, state.FailureCount))
+	state.ProbeLeaseUntil = time.Time{}
+	state.LastError = signal.Label()
+	s.updateQuarantinedLocked(credID)
 	s.clearStickyForCred(credID)
 	s.mu.Unlock()
 }
@@ -390,6 +518,7 @@ func (s *Selector) MarkModelSuccess(credID, model, stickyKey string, now time.Ti
 				delete(s.modelStates, credID)
 			}
 		}
+		s.updateQuarantinedLocked(credID)
 		s.mu.Unlock()
 	}
 	s.MarkSuccess(credID, stickyKey, now)
@@ -429,9 +558,35 @@ func (s *Selector) availableLocked(creds []storage.Credential, now time.Time) []
 		if s.inCooldown(c, now) {
 			continue
 		}
+		if state := s.states[c.ID]; state != nil && state.FailureCount > 0 {
+			continue
+		}
 		out = append(out, c)
 	}
 	return out
+}
+
+func (s *Selector) pickProbeFromCredentials(credentials []storage.Credential, now time.Time) (storage.Credential, bool) {
+	count := len(credentials)
+	if count == 0 {
+		return storage.Credential{}, false
+	}
+	for n := 0; n < count; n++ {
+		idx := s.probeIndex % count
+		s.probeIndex = (idx + 1) % count
+		credential := credentials[idx]
+		if !credential.Enabled {
+			continue
+		}
+		s.seedState(credential)
+		state := s.states[credential.ID]
+		if state == nil || state.FailureCount == 0 || state.CooldownUntil.After(now) || state.ProbeLeaseUntil.After(now) {
+			continue
+		}
+		state.ProbeLeaseUntil = now.Add(normalizeAdaptiveConfig(s.adaptive).ProbeLease)
+		return credential, true
+	}
+	return storage.Credential{}, false
 }
 
 // seedState restores runtime backoff from persisted health after restart.
@@ -440,7 +595,7 @@ func (s *Selector) seedState(c storage.Credential) {
 	if _, exists := s.states[c.ID]; exists {
 		return
 	}
-	st := &runtimeState{FailureCount: c.FailureCount, LastError: c.LastError}
+	st := &runtimeState{FailureCount: c.FailureCount, FailureClass: failureClassFromLabel(c.LastError), LastError: c.LastError}
 	if c.CooldownUntil != nil {
 		st.CooldownUntil = *c.CooldownUntil
 	}
@@ -514,6 +669,26 @@ func (s *Selector) ensureState(credID string) *runtimeState {
 		s.states[credID] = st
 	}
 	return st
+}
+
+// updateQuarantinedLocked synchronizes the compact probe index with runtime
+// health. Removed entries are left as cheap tombstones until the next pool
+// snapshot rebuild; this keeps success recording O(1).
+func (s *Selector) updateQuarantinedLocked(credID string) {
+	if credID == "" {
+		return
+	}
+	state := s.states[credID]
+	failed := (state != nil && state.FailureCount > 0) || len(s.modelStates[credID]) > 0
+	_, exists := s.quarantinedSet[credID]
+	if failed && !exists {
+		s.quarantinedSet[credID] = struct{}{}
+		s.quarantinedIDs = append(s.quarantinedIDs, credID)
+		return
+	}
+	if !failed && exists {
+		delete(s.quarantinedSet, credID)
+	}
 }
 
 func findByID(creds []storage.Credential, id string) (storage.Credential, bool) {

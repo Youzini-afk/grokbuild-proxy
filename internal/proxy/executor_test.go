@@ -3,6 +3,7 @@ package proxy
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -276,6 +277,59 @@ func TestExecutorUsesRuntimeMaxAttempts(t *testing.T) {
 	_ = resp.Body.Close()
 	if got := calls.Load(); got != 5 {
 		t.Fatalf("upstream calls=%d want 5", got)
+	}
+}
+
+func TestClassifyKnownGrokCredentialFailures(t *testing.T) {
+	tests := []struct {
+		name     string
+		status   int
+		body     string
+		want     lb.FailureClass
+		wantCode string
+	}{
+		{
+			name: "bad credentials", status: http.StatusUnauthorized,
+			body: `{"code":"unauthenticated:bad-credentials","error":"The OAuth2 access token could not be validated."}`,
+			want: lb.FailureAuth, wantCode: "unauthenticated:bad-credentials",
+		},
+		{
+			name: "spending limit", status: http.StatusForbidden,
+			body: `{"code":"personal-team-blocked:spending-limit","error":"You have run out of credits or need a Grok subscription."}`,
+			want: lb.FailureQuota, wantCode: "personal-team-blocked:spending-limit",
+		},
+		{
+			name: "nested rate limit", status: http.StatusTooManyRequests,
+			body: `{"error":{"code":"rate-limit","message":"slow down"}}`,
+			want: lb.FailureRateLimit, wantCode: "rate-limit",
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			response := &http.Response{
+				StatusCode: test.status, Header: make(http.Header),
+				Body: io.NopCloser(strings.NewReader(test.body)),
+			}
+			signal, regional := classifyUpstreamFailure(response, 0)
+			if regional || signal.Class != test.want || signal.Code != test.wantCode {
+				t.Fatalf("signal=%+v regional=%v", signal, regional)
+			}
+			restored, err := io.ReadAll(response.Body)
+			if err != nil || string(restored) != test.body {
+				t.Fatalf("response body was not restored: %q err=%v", restored, err)
+			}
+		})
+	}
+}
+
+func TestClassifyTokenRefreshFailureSeparatesInvalidGrantFromOutage(t *testing.T) {
+	authFailure := classifyTokenRefreshFailure(errors.New(`auth token: status 400: {"error":"invalid_grant"}`))
+	if authFailure.Class != lb.FailureAuth || authFailure.Status != http.StatusUnauthorized {
+		t.Fatalf("invalid grant signal=%+v", authFailure)
+	}
+	transient := classifyTokenRefreshFailure(errors.New("auth token: request: i/o timeout"))
+	if transient.Class != lb.FailureTransient || transient.Status != 0 {
+		t.Fatalf("network signal=%+v", transient)
 	}
 }
 

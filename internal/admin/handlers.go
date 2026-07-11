@@ -114,6 +114,10 @@ type maskedCredential struct {
 	FailureCount  int                     `json:"failure_count"`
 	CooldownUntil *time.Time              `json:"cooldown_until,omitempty"`
 	LastError     string                  `json:"last_error,omitempty"`
+	HealthStatus  string                  `json:"health_status"`
+	FailureClass  string                  `json:"failure_class,omitempty"`
+	Abnormal      bool                    `json:"abnormal"`
+	NextProbeAt   *time.Time              `json:"next_probe_at,omitempty"`
 	LastUsedAt    *time.Time              `json:"last_used_at,omitempty"`
 	LastSuccessAt *time.Time              `json:"last_success_at,omitempty"`
 	Billing       map[string]any          `json:"billing,omitempty"`
@@ -233,6 +237,10 @@ func (h *Handlers) ListCredentials(w http.ResponseWriter, r *http.Request) {
 	}
 	query := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("q")))
 	statusFilter := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("status")))
+	abnormalAfter := 4
+	if h.RuntimeSettings != nil && h.RuntimeSettings.Get().Health.AuthAbnormalAfter > 0 {
+		abnormalAfter = h.RuntimeSettings.Get().Health.AuthAbnormalAfter
+	}
 	if query != "" || statusFilter != "" {
 		now := time.Now()
 		filtered := make([]storage.Credential, 0, len(creds))
@@ -243,6 +251,7 @@ func (h *Handlers) ListCredentials(w http.ResponseWriter, r *http.Request) {
 				continue
 			}
 			cooling := credential.CooldownUntil != nil && credential.CooldownUntil.After(now)
+			healthStatus, _, _ := credentialHealth(credential, abnormalAfter, now)
 			switch statusFilter {
 			case "enabled":
 				if !credential.Enabled {
@@ -257,7 +266,19 @@ func (h *Handlers) ListCredentials(w http.ResponseWriter, r *http.Request) {
 					continue
 				}
 			case "available":
-				if !credential.Enabled || cooling {
+				if !credential.Enabled || cooling || credential.FailureCount > 0 {
+					continue
+				}
+			case "abnormal":
+				if healthStatus != "abnormal" {
+					continue
+				}
+			case "quota_limited":
+				if healthStatus != "quota_limited" {
+					continue
+				}
+			case "probe_due":
+				if healthStatus != "probe_due" {
 					continue
 				}
 			}
@@ -275,6 +296,10 @@ func (h *Handlers) ListCredentials(w http.ResponseWriter, r *http.Request) {
 	usage, hasUsage := h.Store.(usageProvider)
 	for _, c := range creds[offset:end] {
 		masked := maskCredential(c)
+		masked.HealthStatus, masked.FailureClass, masked.Abnormal = credentialHealth(c, abnormalAfter, time.Now())
+		if c.FailureCount > 0 {
+			masked.NextProbeAt = c.CooldownUntil
+		}
 		if hasUsage {
 			masked.Usage = usage.CredentialUsage(c.ID)
 		}
@@ -288,6 +313,26 @@ func (h *Handlers) ListCredentials(w http.ResponseWriter, r *http.Request) {
 		"credentials": out, "total": len(creds), "offset": offset,
 		"limit": limit, "next_offset": nextOffset,
 	})
+}
+
+func credentialHealth(credential storage.Credential, abnormalAfter int, now time.Time) (status, failureClass string, abnormal bool) {
+	if !credential.Enabled {
+		return "disabled", "", false
+	}
+	failureClass, _, _ = strings.Cut(credential.LastError, ":")
+	if credential.FailureCount <= 0 {
+		return "healthy", "", false
+	}
+	if failureClass == "auth_invalid" && credential.FailureCount >= abnormalAfter {
+		return "abnormal", failureClass, true
+	}
+	if failureClass == "quota_exhausted" {
+		return "quota_limited", failureClass, false
+	}
+	if credential.CooldownUntil != nil && credential.CooldownUntil.After(now) {
+		return "cooling", failureClass, false
+	}
+	return "probe_due", failureClass, false
 }
 
 // UsageSummary GET /admin/usage/summary?hours=24
@@ -614,6 +659,10 @@ func (h *Handlers) System(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusInternalServerError, "credential store unavailable")
 		return
 	}
+	abnormalAfter := 4
+	if h.RuntimeSettings != nil && h.RuntimeSettings.Get().Health.AuthAbnormalAfter > 0 {
+		abnormalAfter = h.RuntimeSettings.Get().Health.AuthAbnormalAfter
+	}
 	response := map[string]any{
 		"version": h.version(),
 		"listen":  h.Config.Listen,
@@ -630,7 +679,7 @@ func (h *Handlers) System(w http.ResponseWriter, r *http.Request) {
 			"enabled": h.Config.Anthropic.Enabled,
 		},
 		"limits": h.Config.Limits,
-		"pool":   summarizePool(credentials, time.Now()),
+		"pool":   summarizePool(credentials, time.Now(), abnormalAfter),
 	}
 	if provider, ok := h.Store.(storageStatsProvider); ok {
 		response["storage"] = provider.Stats()
@@ -660,7 +709,9 @@ func (h *Handlers) UpdateRuntimeSettings(w http.ResponseWriter, r *http.Request)
 		writeErr(w, http.StatusNotImplemented, "runtime settings unavailable")
 		return
 	}
-	var settings runtimecfg.Settings
+	// Decode over the current snapshot so older UIs and API clients can omit
+	// newly introduced setting groups without zeroing them.
+	settings := h.RuntimeSettings.Get()
 	if err := decodeJSON(r, min(h.maxBody(), 1<<20), &settings); err != nil {
 		writeErr(w, http.StatusBadRequest, err.Error())
 		return

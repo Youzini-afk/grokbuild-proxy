@@ -17,6 +17,7 @@ type Settings struct {
 	MetricsPublic bool          `json:"metrics_public"`
 	LogLevel      string        `json:"log_level"`
 	LoadBalancing LoadBalancing `json:"load_balancing"`
+	Health        Health        `json:"health"`
 	Refresh       Refresh       `json:"refresh"`
 	Limits        RuntimeLimits `json:"limits"`
 }
@@ -39,6 +40,18 @@ type Refresh struct {
 	Workers         int `json:"workers"`
 	IntervalSec     int `json:"interval_sec"`
 	ActiveWindowSec int `json:"active_window_sec"`
+}
+
+type Health struct {
+	AuthInitialSec     int `json:"auth_initial_sec"`
+	AuthMaxSec         int `json:"auth_max_sec"`
+	AuthAbnormalAfter  int `json:"auth_abnormal_after"`
+	QuotaInitialSec    int `json:"quota_initial_sec"`
+	QuotaMaxSec        int `json:"quota_max_sec"`
+	RateInitialSec     int `json:"rate_initial_sec"`
+	RateMaxSec         int `json:"rate_max_sec"`
+	ProbeEveryRequests int `json:"probe_every_requests"`
+	ProbeLeaseSec      int `json:"probe_lease_sec"`
 }
 
 type Store interface {
@@ -90,6 +103,12 @@ func Defaults(cfg config.Config) Settings {
 			StickyTTLSec:    cfg.LB.StickyTTLSec,
 			CooldownBaseSec: cooldownBase,
 			CooldownMaxSec:  cooldownMax,
+		},
+		Health: Health{
+			AuthInitialSec: 60, AuthMaxSec: 6 * 3600, AuthAbnormalAfter: 4,
+			QuotaInitialSec: 5 * 60, QuotaMaxSec: 2 * 3600,
+			RateInitialSec: 30, RateMaxSec: 30 * 60,
+			ProbeEveryRequests: 20, ProbeLeaseSec: 120,
 		},
 		Refresh: Refresh{
 			Workers:         cfg.LB.RefreshWorkers,
@@ -220,6 +239,27 @@ func (s Settings) Validate() error {
 	}
 	if s.LoadBalancing.CooldownMaxSec < s.LoadBalancing.CooldownBaseSec || s.LoadBalancing.CooldownMaxSec > 7*24*3600 {
 		return fmt.Errorf("cooldown_max_sec must be >= base and <= 604800")
+	}
+	if s.Health.AuthInitialSec < 10 || s.Health.AuthInitialSec > 3600 ||
+		s.Health.AuthMaxSec < s.Health.AuthInitialSec || s.Health.AuthMaxSec > 7*24*3600 {
+		return fmt.Errorf("health auth cooldown must be 10..3600 initial and initial..604800 max")
+	}
+	if s.Health.AuthAbnormalAfter < 2 || s.Health.AuthAbnormalAfter > 20 {
+		return fmt.Errorf("health.auth_abnormal_after must be between 2 and 20")
+	}
+	if s.Health.QuotaInitialSec < 30 || s.Health.QuotaInitialSec > 24*3600 ||
+		s.Health.QuotaMaxSec < s.Health.QuotaInitialSec || s.Health.QuotaMaxSec > 7*24*3600 {
+		return fmt.Errorf("health quota cooldown is invalid")
+	}
+	if s.Health.RateInitialSec < 5 || s.Health.RateInitialSec > 3600 ||
+		s.Health.RateMaxSec < s.Health.RateInitialSec || s.Health.RateMaxSec > 24*3600 {
+		return fmt.Errorf("health rate-limit cooldown is invalid")
+	}
+	if s.Health.ProbeEveryRequests < 1 || s.Health.ProbeEveryRequests > 10000 {
+		return fmt.Errorf("health.probe_every_requests must be between 1 and 10000")
+	}
+	if s.Health.ProbeLeaseSec < 10 || s.Health.ProbeLeaseSec > 3600 {
+		return fmt.Errorf("health.probe_lease_sec must be between 10 and 3600")
 	}
 	if s.Refresh.Workers < 0 || s.Refresh.Workers > 64 {
 		return fmt.Errorf("refresh.workers must be between 0 and 64")

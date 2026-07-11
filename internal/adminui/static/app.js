@@ -508,6 +508,18 @@
       c.enabled ? "已启用" : "已禁用"
     );
     top.appendChild(badge);
+    var healthLabels = {
+      healthy: "健康",
+      cooling: "冷却中",
+      probe_due: "待探测",
+      quota_limited: "额度受限",
+      abnormal: "异常账号",
+      disabled: "已禁用"
+    };
+    if (c.enabled && c.health_status && c.health_status !== "healthy") {
+      var healthTone = c.health_status === "abnormal" ? "badge-danger" : "badge-warn";
+      top.appendChild(el("span", "badge " + healthTone, healthLabels[c.health_status] || c.health_status));
+    }
     card.appendChild(top);
 
     var usage = c.usage || {};
@@ -548,6 +560,17 @@
     if (c.failure_count) {
       meta.appendChild(lineMeta("失败次数", String(c.failure_count)));
     }
+    if (c.failure_class) {
+      var failureLabels = {
+        auth_invalid: "鉴权失效",
+        quota_exhausted: "额度耗尽",
+        rate_limited: "请求限流",
+        transient: "临时故障",
+        model_unavailable: "模型不可用",
+        other: "其他错误"
+      };
+      meta.appendChild(lineMeta("健康分类", failureLabels[c.failure_class] || c.failure_class));
+    }
     if (c.last_error) {
       var errLine = el("div");
       errLine.appendChild(el("span", "badge badge-danger", "错误"));
@@ -557,6 +580,9 @@
     }
     if (c.cooldown_until) {
       meta.appendChild(lineMeta("冷却至", fmtTime(c.cooldown_until)));
+    }
+    if (c.health_status === "probe_due") {
+      meta.appendChild(lineMeta("恢复状态", "等待半开探测"));
     }
     if (c.access_token) {
       meta.appendChild(lineMeta("访问令牌(脱敏)", c.access_token));
@@ -1323,6 +1349,7 @@
       .then(function (data) {
         var settings = (data && data.settings) || {};
         var lb = settings.load_balancing || {};
+        var health = settings.health || {};
         var refresh = settings.refresh || {};
         var limits = settings.limits || {};
         settingValue("settings-max-attempts", settings.max_attempts);
@@ -1331,6 +1358,15 @@
         settingValue("settings-sticky-ttl", lb.sticky_ttl_sec);
         settingValue("settings-cooldown-base", lb.cooldown_base_sec);
         settingValue("settings-cooldown-max", lb.cooldown_max_sec);
+        settingValue("settings-auth-initial", health.auth_initial_sec);
+        settingValue("settings-auth-max", health.auth_max_sec);
+        settingValue("settings-auth-abnormal", health.auth_abnormal_after);
+        settingValue("settings-quota-initial", health.quota_initial_sec);
+        settingValue("settings-quota-max", health.quota_max_sec);
+        settingValue("settings-rate-initial", health.rate_initial_sec);
+        settingValue("settings-rate-max", health.rate_max_sec);
+        settingValue("settings-probe-every", health.probe_every_requests);
+        settingValue("settings-probe-lease", health.probe_lease_sec);
         settingValue("settings-refresh-workers", refresh.workers);
         settingValue("settings-refresh-interval", refresh.interval_sec);
         settingValue("settings-refresh-window", refresh.active_window_sec);
@@ -1368,6 +1404,17 @@
         sticky_ttl_sec: numericSetting("settings-sticky-ttl"),
         cooldown_base_sec: numericSetting("settings-cooldown-base"),
         cooldown_max_sec: numericSetting("settings-cooldown-max")
+      },
+      health: {
+        auth_initial_sec: numericSetting("settings-auth-initial"),
+        auth_max_sec: numericSetting("settings-auth-max"),
+        auth_abnormal_after: numericSetting("settings-auth-abnormal"),
+        quota_initial_sec: numericSetting("settings-quota-initial"),
+        quota_max_sec: numericSetting("settings-quota-max"),
+        rate_initial_sec: numericSetting("settings-rate-initial"),
+        rate_max_sec: numericSetting("settings-rate-max"),
+        probe_every_requests: numericSetting("settings-probe-every"),
+        probe_lease_sec: numericSetting("settings-probe-lease")
       },
       refresh: {
         workers: numericSetting("settings-refresh-workers"),

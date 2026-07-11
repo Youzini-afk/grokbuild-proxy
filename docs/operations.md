@@ -37,6 +37,39 @@ Listen address, data directory, upstream/OAuth identity, and bootstrap secrets
 remain startup-only settings. They are intentionally excluded from the live UI
 to prevent an accidental lockout or redirect of credential-bearing traffic.
 
+### Adaptive credential health
+
+Upstream failures are classified by semantic error code, not HTTP status
+alone. The scheduler maintains an independent consecutive-failure streak for
+each class and resets that streak when the class changes:
+
+- `auth_invalid` starts at a one-minute quarantine and grows by 5x to a
+  six-hour cap. Four consecutive failures mark the account as abnormal in the
+  Admin UI, but do not delete it.
+- `quota_exhausted` starts at five minutes and grows by 2x to a two-hour cap.
+  Grok's `personal-team-blocked:spending-limit` response belongs to this class
+  even when it is returned as HTTP 403.
+- `rate_limited` starts at 30 seconds, grows by 2x to 30 minutes, and honors a
+  shorter or longer upstream `Retry-After` within that cap.
+- transport/5xx failures use a short transient schedule. OAuth endpoint
+  network failures are transient; only invalid-grant/credential responses
+  contribute to the authentication streak.
+
+An expired quarantine does not immediately return to normal rotation. It enters
+half-open state and receives one leased probe request. By default one recovery
+probe is scheduled per 20 incoming picks and the lease lasts two minutes, which
+prevents concurrent requests from creating a probe storm. One successful
+upstream response clears the streak and immediately restores normal rotation;
+another failure advances the class-specific schedule. If every account is
+quarantined, a due probe is selected immediately instead of waiting for the
+normal probe interval.
+
+All timings, the abnormal threshold, probe frequency, and probe lease are live
+settings under **Runtime Settings > Adaptive credential health**. Health state
+is persisted in SQLite and survives restart. Credential filters expose
+`quota_limited`, `probe_due`, and `abnormal` states without exposing tokens or
+upstream response bodies.
+
 ## Logs
 
 Logs are JSON on stdout. Request records include request ID, method, route

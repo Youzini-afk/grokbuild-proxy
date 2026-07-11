@@ -48,6 +48,17 @@ func TestEmbeddedDashboardAssetsPresent(t *testing.T) {
 	if !strings.Contains(string(app), "/admin/settings") {
 		t.Fatal("runtime settings API missing from embedded app")
 	}
+	if !strings.Contains(string(index), `id="settings-auth-abnormal"`) ||
+		!strings.Contains(string(index), `id="settings-probe-every"`) {
+		t.Fatal("adaptive credential health settings missing from embedded index")
+	}
+	if !strings.Contains(string(app), "probe_every_requests") ||
+		!strings.Contains(string(app), "health_status") {
+		t.Fatal("adaptive health settings/status missing from embedded app")
+	}
+	if !strings.Contains(string(styles), ".settings-grid-health") {
+		t.Fatal("adaptive health settings styles missing from embedded CSS")
+	}
 }
 
 func TestIndexHandlerServesHTMLWithoutAuth(t *testing.T) {

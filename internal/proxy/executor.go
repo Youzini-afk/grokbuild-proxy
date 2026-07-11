@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -66,6 +67,11 @@ type cachedSelector interface {
 type modelAwareSelector interface {
 	MarkModelFailure(credID, model string, status int, retryAfter time.Duration, now time.Time)
 	MarkModelSuccess(credID, model, stickyKey string, now time.Time)
+}
+
+type classifiedFailureSelector interface {
+	MarkClassifiedFailure(credID string, signal lb.FailureSignal, now time.Time)
+	MarkModelClassifiedFailure(credID, model string, signal lb.FailureSignal, now time.Time)
 }
 
 // Upstream is the subset of upstream.Client used by the executor.
@@ -189,8 +195,9 @@ func (e *Executor) Post(ctx context.Context, model, convID string, body []byte, 
 					continue
 				}
 			}
-			e.recordCredentialCall(cred, model, http.StatusUnauthorized, false, attemptStarted, err)
-			e.markFailure(cred.ID, model, http.StatusUnauthorized, 0, e.now())
+			signal := classifyTokenRefreshFailure(err)
+			e.recordCredentialCall(cred, model, signal.Status, false, attemptStarted, errors.New(signal.Label()))
+			e.markClassifiedFailure(cred.ID, model, signal, e.now())
 			continue
 		}
 		// Reload after possible token persist so subsequent updates keep latest fields.
@@ -250,8 +257,11 @@ func (e *Executor) Post(ctx context.Context, model, convID string, body []byte, 
 			if rerr != nil {
 				lastErr = rerr
 				lastResp = unauthorizedResp
-				e.recordCredentialCall(cred, model, http.StatusUnauthorized, false, attemptStarted, rerr)
-				e.markFailure(cred.ID, model, http.StatusUnauthorized, 0, e.now())
+				// A token endpoint outage must not teach the scheduler that a
+				// recoverable account has permanently invalid credentials.
+				signal := classifyTokenRefreshFailure(rerr)
+				e.recordCredentialCall(cred, model, signal.Status, false, attemptStarted, errors.New(signal.Label()))
+				e.markClassifiedFailure(cred.ID, model, signal, e.now())
 				continue
 			}
 			retry, rerr := e.Upstream.PostResponses(ctx, body, upstream.PostResponsesOptions{
@@ -264,7 +274,7 @@ func (e *Executor) Post(ctx context.Context, model, convID string, body []byte, 
 			if rerr != nil {
 				lastErr = rerr
 				e.recordCredentialCall(cred, model, 0, false, attemptStarted, rerr)
-				e.markFailure(cred.ID, model, http.StatusUnauthorized, 0, e.now())
+				e.markFailure(cred.ID, model, 0, 0, e.now())
 				continue
 			}
 			if retry.StatusCode >= 200 && retry.StatusCode < 300 {
@@ -281,14 +291,15 @@ func (e *Executor) Post(ctx context.Context, model, convID string, body []byte, 
 			ra := parseRetryAfterAt(retry.Header.Get("Retry-After"), e.now())
 			status := retry.StatusCode
 			lastResp = bufferErrorResponse(retry)
-			e.recordCredentialCall(cred, model, status, false, attemptStarted, nil)
-			if isRegionalModelUnavailable(lastResp) {
+			signal, regional := classifyUpstreamFailure(lastResp, ra)
+			e.recordCredentialCall(cred, model, status, false, attemptStarted, errors.New(signal.Label()))
+			if regional {
 				if e.Observer != nil {
 					e.Observer.ObserveRegionalModelError()
 				}
 				return lastResp, nil
 			}
-			e.markFailure(cred.ID, model, status, ra, e.now())
+			e.markClassifiedFailure(cred.ID, model, signal, e.now())
 			e.log(ctx, slog.LevelWarn, "upstream_retryable_status",
 				"credential_id", cred.ID,
 				"attempt", attempt+1,
@@ -304,14 +315,15 @@ func (e *Executor) Post(ctx context.Context, model, convID string, body []byte, 
 			ra := parseRetryAfterAt(resp.Header.Get("Retry-After"), e.now())
 			status := resp.StatusCode
 			lastResp = bufferErrorResponse(resp)
-			e.recordCredentialCall(cred, model, status, false, attemptStarted, nil)
-			if isRegionalModelUnavailable(lastResp) {
+			signal, regional := classifyUpstreamFailure(lastResp, ra)
+			e.recordCredentialCall(cred, model, status, false, attemptStarted, errors.New(signal.Label()))
+			if regional {
 				if e.Observer != nil {
 					e.Observer.ObserveRegionalModelError()
 				}
 				return lastResp, nil
 			}
-			e.markFailure(cred.ID, model, status, ra, e.now())
+			e.markClassifiedFailure(cred.ID, model, signal, e.now())
 			e.log(ctx, slog.LevelWarn, "upstream_retryable_status",
 				"credential_id", cred.ID,
 				"attempt", attempt+1,
@@ -576,16 +588,28 @@ func (e *Executor) pruneCredentialCaches(version uint64, credentials []storage.C
 }
 
 func (e *Executor) markFailure(credID, model string, status int, retryAfter time.Duration, now time.Time) {
+	e.markClassifiedFailure(credID, model, lb.FailureSignalForStatus(status, retryAfter), now)
+}
+
+func (e *Executor) markClassifiedFailure(credID, model string, signal lb.FailureSignal, now time.Time) {
 	if e.Observer != nil {
 		e.Observer.ObserveCredentialFailure()
 	}
-	if status == http.StatusForbidden {
+	if selector, ok := e.Selector.(classifiedFailureSelector); ok {
+		if signal.Class == lb.FailureModel {
+			selector.MarkModelClassifiedFailure(credID, model, signal, now)
+		} else {
+			selector.MarkClassifiedFailure(credID, signal, now)
+		}
+		return
+	}
+	if signal.Class == lb.FailureModel {
 		if selector, ok := e.Selector.(modelAwareSelector); ok {
-			selector.MarkModelFailure(credID, model, status, retryAfter, now)
+			selector.MarkModelFailure(credID, model, signal.Status, signal.RetryAfter, now)
 			return
 		}
 	}
-	e.Selector.MarkFailure(credID, status, retryAfter, now)
+	e.Selector.MarkFailure(credID, signal.Status, signal.RetryAfter, now)
 }
 
 func (e *Executor) markSuccess(credID, model, stickyKey string, now time.Time) {
@@ -679,16 +703,105 @@ func bufferErrorResponse(resp *http.Response) *http.Response {
 	return clone
 }
 
-func isRegionalModelUnavailable(resp *http.Response) bool {
-	if resp == nil || resp.StatusCode != http.StatusForbidden || resp.Body == nil {
-		return false
+func classifyUpstreamFailure(resp *http.Response, retryAfter time.Duration) (lb.FailureSignal, bool) {
+	if resp == nil {
+		return lb.FailureSignal{Class: lb.FailureTransient, RetryAfter: retryAfter}, false
+	}
+	raw := readAndRestoreResponseBody(resp)
+	code, message := upstreamErrorIdentity(raw)
+	lowerCode := strings.ToLower(code)
+	lowerMessage := strings.ToLower(message)
+	regional := strings.Contains(lowerMessage, "not available in your region") ||
+		strings.Contains(lowerMessage, "unavailable in your region")
+	class := lb.FailureOther
+	switch {
+	case regional:
+		class = lb.FailureModel
+	case resp.StatusCode == http.StatusUnauthorized,
+		strings.Contains(lowerCode, "unauthenticated"),
+		strings.Contains(lowerCode, "bad-credentials"),
+		strings.Contains(lowerCode, "invalid-token"),
+		strings.Contains(lowerMessage, "access token could not be validated"):
+		class = lb.FailureAuth
+	case resp.StatusCode == http.StatusPaymentRequired,
+		strings.Contains(lowerCode, "spending-limit"),
+		strings.Contains(lowerCode, "personal-team-blocked"),
+		strings.Contains(lowerMessage, "run out of credits"),
+		strings.Contains(lowerMessage, "need a grok subscription"):
+		class = lb.FailureQuota
+	case resp.StatusCode == http.StatusTooManyRequests,
+		strings.Contains(lowerCode, "rate-limit"),
+		strings.Contains(lowerCode, "too-many-requests"):
+		class = lb.FailureRateLimit
+	case resp.StatusCode == http.StatusForbidden:
+		// Region/model and spending-limit 403s were handled above. Remaining
+		// credential-bound 403s are treated as authentication failures.
+		class = lb.FailureAuth
+	case resp.StatusCode >= 500:
+		class = lb.FailureTransient
+	}
+	return lb.FailureSignal{Class: class, Status: resp.StatusCode, Code: code, RetryAfter: retryAfter}, regional
+}
+
+func classifyTokenRefreshFailure(err error) lb.FailureSignal {
+	if err == nil {
+		return lb.FailureSignal{Class: lb.FailureTransient}
+	}
+	message := strings.ToLower(err.Error())
+	class := lb.FailureTransient
+	status := 0
+	switch {
+	case strings.Contains(message, "invalid_grant"),
+		strings.Contains(message, "bad-credentials"),
+		strings.Contains(message, "unauthenticated"),
+		strings.Contains(message, "refresh_token is required"),
+		strings.Contains(message, "no refresh_token"),
+		strings.Contains(message, "status 400"),
+		strings.Contains(message, "status 401"),
+		strings.Contains(message, "status 403"):
+		class = lb.FailureAuth
+		status = http.StatusUnauthorized
+	}
+	return lb.FailureSignal{Class: class, Status: status, Code: "oauth-refresh"}
+}
+
+func readAndRestoreResponseBody(resp *http.Response) []byte {
+	if resp == nil || resp.Body == nil {
+		return nil
 	}
 	raw, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 	_ = resp.Body.Close()
 	resp.Body = io.NopCloser(strings.NewReader(string(raw)))
-	message := strings.ToLower(string(raw))
-	return strings.Contains(message, "not available in your region") ||
-		strings.Contains(message, "unavailable in your region")
+	resp.ContentLength = int64(len(raw))
+	return raw
+}
+
+func upstreamErrorIdentity(raw []byte) (code, message string) {
+	var payload map[string]any
+	if json.Unmarshal(raw, &payload) != nil {
+		return "", strings.TrimSpace(string(raw))
+	}
+	code, _ = payload["code"].(string)
+	message, _ = payload["message"].(string)
+	switch value := payload["error"].(type) {
+	case string:
+		if message == "" {
+			message = value
+		}
+	case map[string]any:
+		if code == "" {
+			code, _ = value["code"].(string)
+		}
+		if message == "" {
+			message, _ = value["message"].(string)
+		}
+	}
+	return strings.TrimSpace(code), strings.TrimSpace(message)
+}
+
+func isRegionalModelUnavailable(resp *http.Response) bool {
+	_, regional := classifyUpstreamFailure(resp, 0)
+	return regional
 }
 
 // DrainAndClose is a helper for callers that abandon a response.

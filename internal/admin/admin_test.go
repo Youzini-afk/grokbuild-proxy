@@ -525,6 +525,18 @@ func TestRuntimeSettingsAPIUpdatesAndResets(t *testing.T) {
 		t.Fatalf("update status=%d body=%s settings=%+v", rr.Code, rr.Body.String(), manager.Get())
 	}
 
+	// Older clients do not know about newer setting groups. A partial update
+	// must preserve adaptive health settings instead of replacing them with
+	// invalid zero values.
+	preservedHealth := manager.Get().Health
+	req = httptest.NewRequest(http.MethodPut, "/admin/settings", strings.NewReader(`{"max_attempts":7}`))
+	req.Header.Set("Authorization", "Bearer admin-secret")
+	rr = httptest.NewRecorder()
+	handler.ServeHTTP(rr, req)
+	if rr.Code != http.StatusOK || manager.Get().MaxAttempts != 7 || manager.Get().Health != preservedHealth {
+		t.Fatalf("partial update status=%d body=%s settings=%+v", rr.Code, rr.Body.String(), manager.Get())
+	}
+
 	req = httptest.NewRequest(http.MethodDelete, "/admin/settings", nil)
 	req.Header.Set("Authorization", "Bearer admin-secret")
 	rr = httptest.NewRecorder()
@@ -626,13 +638,40 @@ func TestSummarizePool(t *testing.T) {
 		{ID: "disabled", Enabled: false, AccessToken: "a"},
 		{ID: "missing", Enabled: true},
 		{ID: "expired", Enabled: true, AccessToken: "a", ExpiresAt: now.Add(-time.Minute)},
-	}, now)
+	}, now, 4)
 	if summary.Total != 5 || summary.Available != 1 || summary.Cooling != 1 ||
 		summary.Disabled != 1 || summary.MissingTokens != 1 || summary.Expired != 1 {
 		t.Fatalf("summary=%+v", summary)
 	}
 	if summary.NextRecoveryAt == nil || summary.LastSuccessAt == nil {
 		t.Fatalf("summary timestamps=%+v", summary)
+	}
+}
+
+func TestCredentialHealthClassificationAndPoolCounts(t *testing.T) {
+	now := time.Date(2026, 7, 12, 4, 0, 0, 0, time.UTC)
+	cooling := now.Add(time.Hour)
+	credentials := []storage.Credential{
+		{ID: "healthy", Enabled: true, AccessToken: "a"},
+		{ID: "auth", Enabled: true, AccessToken: "a", FailureCount: 3, LastError: "auth_invalid:unauthenticated:bad-credentials", CooldownUntil: &cooling},
+		{ID: "quota", Enabled: true, AccessToken: "a", FailureCount: 2, LastError: "quota_exhausted:personal-team-blocked:spending-limit", CooldownUntil: &cooling},
+		{ID: "due", Enabled: true, AccessToken: "a", FailureCount: 1, LastError: "rate_limited:http-429"},
+	}
+
+	if status, class, abnormal := credentialHealth(credentials[1], 3, now); status != "abnormal" || class != "auth_invalid" || !abnormal {
+		t.Fatalf("auth health=%q class=%q abnormal=%v", status, class, abnormal)
+	}
+	if status, _, _ := credentialHealth(credentials[2], 3, now); status != "quota_limited" {
+		t.Fatalf("quota health=%q", status)
+	}
+	if status, _, _ := credentialHealth(credentials[3], 3, now); status != "probe_due" {
+		t.Fatalf("probe health=%q", status)
+	}
+
+	summary := summarizePool(credentials, now, 3)
+	if summary.Available != 1 || summary.Cooling != 2 || summary.ProbeDue != 1 ||
+		summary.Abnormal != 1 || summary.QuotaLimited != 1 {
+		t.Fatalf("summary=%+v", summary)
 	}
 }
 

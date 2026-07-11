@@ -100,6 +100,9 @@
                 <option value="">全部状态</option>
                 <option value="available">可用</option>
                 <option value="cooling">冷却中</option>
+                <option value="probe_due">待探测</option>
+                <option value="quota_limited">额度受限</option>
+                <option value="abnormal">异常账号</option>
                 <option value="disabled">已禁用</option>
               </select>
               <button type="button" class="btn" id="btn-cred-refresh-list">刷新列表</button>
@@ -206,6 +209,52 @@
                   <input id="settings-cooldown-max" type="number" min="1" max="604800" required />
                 </label>
               </div>
+            </article>
+
+            <article class="card settings-card settings-card-wide">
+              <div class="settings-card-head">
+                <h3>自适应账号健康</h3>
+                <p class="muted">按错误语义学习退避，并通过单请求半开探测自动恢复</p>
+              </div>
+              <div class="settings-grid settings-grid-health">
+                <label class="field">
+                  <span class="label">鉴权失败初始冷却（秒）</span>
+                  <input id="settings-auth-initial" type="number" min="10" max="3600" required />
+                </label>
+                <label class="field">
+                  <span class="label">鉴权失败最大冷却（秒）</span>
+                  <input id="settings-auth-max" type="number" min="10" max="604800" required />
+                </label>
+                <label class="field">
+                  <span class="label">判为异常的连续次数</span>
+                  <input id="settings-auth-abnormal" type="number" min="2" max="20" required />
+                </label>
+                <label class="field">
+                  <span class="label">额度不足初始冷却（秒）</span>
+                  <input id="settings-quota-initial" type="number" min="30" max="86400" required />
+                </label>
+                <label class="field">
+                  <span class="label">额度不足最大冷却（秒）</span>
+                  <input id="settings-quota-max" type="number" min="30" max="604800" required />
+                </label>
+                <label class="field">
+                  <span class="label">普通限流初始冷却（秒）</span>
+                  <input id="settings-rate-initial" type="number" min="5" max="3600" required />
+                </label>
+                <label class="field">
+                  <span class="label">普通限流最大冷却（秒）</span>
+                  <input id="settings-rate-max" type="number" min="5" max="86400" required />
+                </label>
+                <label class="field">
+                  <span class="label">每多少请求安排一次恢复探测</span>
+                  <input id="settings-probe-every" type="number" min="1" max="10000" required />
+                </label>
+                <label class="field">
+                  <span class="label">探测租约（秒）</span>
+                  <input id="settings-probe-lease" type="number" min="10" max="3600" required />
+                </label>
+              </div>
+              <p class="muted">默认策略：鉴权 1 分钟起、额度 5 分钟起、限流 30 秒起；成功一次即恢复为健康。</p>
             </article>
 
             <article class="card settings-card">

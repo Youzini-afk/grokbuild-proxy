@@ -12,6 +12,9 @@ type poolSummary struct {
 	Enabled        int        `json:"enabled"`
 	Available      int        `json:"available"`
 	Cooling        int        `json:"cooling"`
+	Abnormal       int        `json:"abnormal"`
+	QuotaLimited   int        `json:"quota_limited"`
+	ProbeDue       int        `json:"probe_due"`
 	Disabled       int        `json:"disabled"`
 	Expired        int        `json:"expired"`
 	MissingTokens  int        `json:"missing_tokens"`
@@ -19,7 +22,10 @@ type poolSummary struct {
 	LastSuccessAt  *time.Time `json:"last_success_at,omitempty"`
 }
 
-func summarizePool(creds []storage.Credential, now time.Time) poolSummary {
+func summarizePool(creds []storage.Credential, now time.Time, abnormalAfter int) poolSummary {
+	if abnormalAfter < 1 {
+		abnormalAfter = 4
+	}
 	summary := poolSummary{Total: len(creds)}
 	for _, credential := range creds {
 		if !credential.Enabled {
@@ -46,8 +52,17 @@ func summarizePool(creds []storage.Credential, now time.Time) poolSummary {
 				value := credential.CooldownUntil.UTC()
 				summary.NextRecoveryAt = &value
 			}
+		} else if credential.FailureCount > 0 {
+			summary.ProbeDue++
 		} else {
 			summary.Available++
+		}
+		failureClass, _, _ := strings.Cut(credential.LastError, ":")
+		if failureClass == "auth_invalid" && credential.FailureCount >= abnormalAfter {
+			summary.Abnormal++
+		}
+		if failureClass == "quota_exhausted" && credential.FailureCount > 0 {
+			summary.QuotaLimited++
 		}
 		if credential.LastSuccessAt != nil &&
 			(summary.LastSuccessAt == nil || credential.LastSuccessAt.After(*summary.LastSuccessAt)) {

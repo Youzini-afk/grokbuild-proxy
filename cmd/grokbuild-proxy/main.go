@@ -151,6 +151,17 @@ func main() {
 		lbConfig.Cooldown.BaseSec = settings.LoadBalancing.CooldownBaseSec
 		lbConfig.Cooldown.MaxSec = settings.LoadBalancing.CooldownMaxSec
 		selector.ApplyConfig(lbConfig)
+		selector.ApplyAdaptiveConfig(lb.AdaptiveConfig{
+			AuthInitial:       time.Duration(settings.Health.AuthInitialSec) * time.Second,
+			AuthMax:           time.Duration(settings.Health.AuthMaxSec) * time.Second,
+			AuthAbnormalAfter: settings.Health.AuthAbnormalAfter,
+			QuotaInitial:      time.Duration(settings.Health.QuotaInitialSec) * time.Second,
+			QuotaMax:          time.Duration(settings.Health.QuotaMaxSec) * time.Second,
+			RateInitial:       time.Duration(settings.Health.RateInitialSec) * time.Second,
+			RateMax:           time.Duration(settings.Health.RateMaxSec) * time.Second,
+			ProbeEvery:        uint64(settings.Health.ProbeEveryRequests),
+			ProbeLease:        time.Duration(settings.Health.ProbeLeaseSec) * time.Second,
+		})
 	})
 
 	metrics := &httpserver.Metrics{}

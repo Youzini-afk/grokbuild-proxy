@@ -249,7 +249,10 @@ func TestMarkFailure_429CooldownSkips(t *testing.T) {
 		}
 	}
 
-	// After cooldown expires, both become available again.
+	// After cooldown expires the account returns through a controlled probe.
+	adaptive := DefaultAdaptiveConfig()
+	adaptive.ProbeEvery = 1
+	s.ApplyAdaptiveConfig(adaptive)
 	later := now.Add(11 * time.Minute)
 	seen := map[string]bool{}
 	for i := 0; i < 4; i++ {
@@ -287,8 +290,8 @@ func TestMarkFailure_StatusCooldowns(t *testing.T) {
 	s2.mu.Lock()
 	until1 := s2.states["x1"].CooldownUntil
 	s2.mu.Unlock()
-	if until1.Sub(now) < 10*time.Minute {
-		t.Fatalf("401 cooldown too short: %v", until1.Sub(now))
+	if delta := until1.Sub(now); delta < time.Minute || delta > time.Minute+10*time.Second {
+		t.Fatalf("401 initial cooldown=%v", delta)
 	}
 
 	// 403 → max
@@ -297,8 +300,127 @@ func TestMarkFailure_StatusCooldowns(t *testing.T) {
 	s3.mu.Lock()
 	until3 := s3.states["x3"].CooldownUntil
 	s3.mu.Unlock()
-	if until3.Sub(now) < 50*time.Minute {
-		t.Fatalf("403 cooldown too short: %v", until3.Sub(now))
+	if delta := until3.Sub(now); delta < time.Minute || delta > time.Minute+10*time.Second {
+		t.Fatalf("403 initial cooldown=%v", delta)
+	}
+}
+
+func TestAdaptiveBackoffEscalatesAndResetsByClass(t *testing.T) {
+	selector := New(testCfg("priority_rr"))
+	now := time.Date(2026, 7, 12, 1, 0, 0, 0, time.UTC)
+	authExpected := []time.Duration{time.Minute, 5 * time.Minute, 25 * time.Minute, 125 * time.Minute, 6 * time.Hour}
+	for i, expected := range authExpected {
+		selector.MarkClassifiedFailure("account", FailureSignal{
+			Class: FailureAuth, Status: 401, Code: "unauthenticated:bad-credentials",
+		}, now)
+		selector.mu.Lock()
+		state := *selector.states["account"]
+		selector.mu.Unlock()
+		delta := state.CooldownUntil.Sub(now)
+		if delta < expected || delta > expected+expected/10+time.Second {
+			t.Fatalf("auth failure %d cooldown=%v expected~%v", i+1, delta, expected)
+		}
+		if state.FailureCount != i+1 || state.FailureClass != FailureAuth {
+			t.Fatalf("auth failure %d state=%+v", i+1, state)
+		}
+	}
+
+	selector.MarkClassifiedFailure("account", FailureSignal{
+		Class: FailureQuota, Status: 403, Code: "personal-team-blocked:spending-limit",
+	}, now)
+	selector.mu.Lock()
+	quota := *selector.states["account"]
+	selector.mu.Unlock()
+	if quota.FailureCount != 1 || quota.FailureClass != FailureQuota ||
+		quota.CooldownUntil.Sub(now) < 5*time.Minute || quota.CooldownUntil.Sub(now) > 5*time.Minute+31*time.Second {
+		t.Fatalf("class change did not reset streak: %+v", quota)
+	}
+}
+
+func TestHalfOpenProbeIsSingleFlightAndSuccessRecovers(t *testing.T) {
+	selector := New(testCfg("round_robin"))
+	adaptive := DefaultAdaptiveConfig()
+	adaptive.ProbeEvery = 3
+	adaptive.ProbeLease = 2 * time.Minute
+	selector.ApplyAdaptiveConfig(adaptive)
+	now := time.Date(2026, 7, 12, 2, 0, 0, 0, time.UTC)
+	credentials := []storage.Credential{cred("recovering", 1, true), cred("healthy", 1, true)}
+	selector.SyncCredentials(1, credentials)
+	selector.MarkClassifiedFailure("recovering", FailureSignal{Class: FailureAuth, Status: 401}, now)
+
+	probeTime := now.Add(2 * time.Minute)
+	for i := 0; i < 2; i++ {
+		picked, err := selector.PickCached(nil, "", "grok-4.5", probeTime)
+		if err != nil || picked.ID != "healthy" {
+			t.Fatalf("normal pick %d=%+v err=%v", i, picked, err)
+		}
+	}
+	probe, err := selector.PickCached(nil, "", "grok-4.5", probeTime)
+	if err != nil || probe.ID != "recovering" {
+		t.Fatalf("scheduled probe=%+v err=%v", probe, err)
+	}
+	for i := 0; i < 4; i++ {
+		picked, pickErr := selector.PickCached(nil, "", "grok-4.5", probeTime)
+		if pickErr != nil || picked.ID != "healthy" {
+			t.Fatalf("probe lease pick %d=%+v err=%v", i, picked, pickErr)
+		}
+	}
+
+	selector.MarkSuccess("recovering", "", probeTime.Add(time.Second))
+	seen := map[string]bool{}
+	for i := 0; i < 4; i++ {
+		picked, pickErr := selector.PickCached(nil, "", "grok-4.5", probeTime.Add(2*time.Second))
+		if pickErr != nil {
+			t.Fatal(pickErr)
+		}
+		seen[picked.ID] = true
+	}
+	if !seen["recovering"] || !seen["healthy"] {
+		t.Fatalf("successful probe did not restore normal rotation: %v", seen)
+	}
+}
+
+func TestConcurrentHalfOpenProbeLeasesOnlyOneRequest(t *testing.T) {
+	selector := New(testCfg("round_robin"))
+	adaptive := DefaultAdaptiveConfig()
+	adaptive.ProbeEvery = 1
+	adaptive.ProbeLease = 2 * time.Minute
+	selector.ApplyAdaptiveConfig(adaptive)
+	now := time.Date(2026, 7, 12, 3, 0, 0, 0, time.UTC)
+	selector.SyncCredentials(1, []storage.Credential{
+		cred("recovering", 1, true),
+		cred("healthy", 1, true),
+	})
+	selector.MarkClassifiedFailure("recovering", FailureSignal{Class: FailureQuota, Status: 403}, now)
+	probeTime := now.Add(6 * time.Minute)
+
+	const workers = 64
+	start := make(chan struct{})
+	results := make(chan string, workers)
+	var wg sync.WaitGroup
+	for i := 0; i < workers; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			<-start
+			credential, err := selector.PickCached(nil, "", "grok-4.5", probeTime)
+			if err != nil {
+				results <- "error"
+				return
+			}
+			results <- credential.ID
+		}()
+	}
+	close(start)
+	wg.Wait()
+	close(results)
+
+	counts := map[string]int{}
+	for result := range results {
+		counts[result]++
+	}
+	if counts["recovering"] != 1 || counts["healthy"] != workers-1 || counts["error"] != 0 {
+		t.Fatalf("concurrent probe results=%v", counts)
 	}
 }
 
@@ -394,7 +516,7 @@ func TestHealthPersistsAcrossSelectorRestart(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if persisted.FailureCount != 1 || persisted.CooldownUntil == nil || persisted.LastError != "http 402" {
+	if persisted.FailureCount != 1 || persisted.CooldownUntil == nil || persisted.LastError != "quota_exhausted:http-402" {
 		t.Fatalf("persisted health=%+v", persisted)
 	}
 	if err := store.Close(); err != nil {

@@ -24,6 +24,9 @@ Versioning and keeps the latest release under GitHub Releases.
 - SQLite-backed runtime settings UI and API with immediate retry, load
   balancing, cooldown, refresh, request-limit, logging, and metrics-access
   updates.
+- Semantic credential health scheduling with class-specific adaptive backoff,
+  durable abnormal/quota states, single-flight half-open recovery probes, and
+  live Admin UI controls.
 
 ### Changed
 
@@ -31,6 +34,8 @@ Versioning and keeps the latest release under GitHub Releases.
   store once per credential.
 - Admin credential lists are paginated and billing is loaded only on demand.
 - Regional model errors no longer consume multiple credential attempts.
+- Credential selection uses a compact quarantine index so scheduled recovery
+  probes do not scan healthy accounts in large pools.
 - API/admin/data-directory settings can be supplied through `API_KEY`,
   `ADMIN_KEY`, and `DATA_DIR`.
 - Prometheus metrics require Admin Bearer authentication by default and can be
