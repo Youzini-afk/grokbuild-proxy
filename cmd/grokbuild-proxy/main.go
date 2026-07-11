@@ -20,6 +20,7 @@ import (
 	"github.com/GreyGunG/grokbuild-proxy/internal/lb"
 	"github.com/GreyGunG/grokbuild-proxy/internal/openai"
 	"github.com/GreyGunG/grokbuild-proxy/internal/proxy"
+	"github.com/GreyGunG/grokbuild-proxy/internal/runtimecfg"
 	"github.com/GreyGunG/grokbuild-proxy/internal/storage"
 	"github.com/GreyGunG/grokbuild-proxy/internal/upstream"
 )
@@ -28,7 +29,9 @@ import (
 var version = "dev"
 
 func main() {
-	logger := newLogger("info")
+	logLevel := &slog.LevelVar{}
+	setLogLevel(logLevel, "info")
+	logger := newLogger(logLevel)
 	slog.SetDefault(logger)
 	configPath := flag.String("config", "", "path to config.yaml (defaults to config.yaml/config.example.yaml when present)")
 	showVersion := flag.Bool("version", false, "print version and exit")
@@ -58,7 +61,8 @@ func main() {
 	if err != nil {
 		fail(logger, "config_invalid", err)
 	}
-	logger = newLogger(cfg.Logging.Level)
+	setLogLevel(logLevel, cfg.Logging.Level)
+	logger = newLogger(logLevel)
 	slog.SetDefault(logger)
 	if value := strings.TrimSpace(os.Getenv("LISTEN")); value != "" {
 		cfg.Listen = value
@@ -82,6 +86,13 @@ func main() {
 		fail(logger, "storage_open_failed", err)
 	}
 	defer store.Close()
+	runtimeSettings, err := runtimecfg.New(store, runtimecfg.Defaults(cfg))
+	if err != nil {
+		fail(logger, "runtime_settings_load_failed", err)
+	}
+	runtimeSettings.Subscribe(func(settings runtimecfg.Settings) {
+		setLogLevel(logLevel, settings.LogLevel)
+	})
 	if *createBackup {
 		info, err := store.CreateBackup()
 		if err != nil {
@@ -133,27 +144,34 @@ func main() {
 	})
 
 	selector := lb.New(cfg.LB).SetHealthStore(store)
+	runtimeSettings.Subscribe(func(settings runtimecfg.Settings) {
+		lbConfig := cfg.LB
+		lbConfig.Strategy = settings.LoadBalancing.Strategy
+		lbConfig.StickyTTLSec = settings.LoadBalancing.StickyTTLSec
+		lbConfig.Cooldown.BaseSec = settings.LoadBalancing.CooldownBaseSec
+		lbConfig.Cooldown.MaxSec = settings.LoadBalancing.CooldownMaxSec
+		selector.ApplyConfig(lbConfig)
+	})
 
 	metrics := &httpserver.Metrics{}
 	exec := &proxy.Executor{
-		Store:     store,
-		Selector:  selector,
-		Upstream:  up,
-		Refresher: refresher,
-		Logger:    logger,
-		RequestID: httpserver.RequestIDFromContext,
-		Observer:  metrics,
+		Store:           store,
+		Selector:        selector,
+		Upstream:        up,
+		Refresher:       refresher,
+		Logger:          logger,
+		RequestID:       httpserver.RequestIDFromContext,
+		Observer:        metrics,
+		RuntimeSettings: runtimeSettings,
 	}
 	schedulerCtx, stopScheduler := context.WithCancel(context.Background())
 	defer stopScheduler()
-	if cfg.LB.RefreshWorkers > 0 && cfg.LB.RefreshIntervalSec > 0 {
-		go exec.RunRefreshScheduler(
-			schedulerCtx,
-			time.Duration(cfg.LB.RefreshIntervalSec)*time.Second,
-			time.Duration(cfg.LB.RefreshActiveWindowSec)*time.Second,
-			cfg.LB.RefreshWorkers,
-		)
-	}
+	go exec.RunRefreshScheduler(
+		schedulerCtx,
+		time.Duration(cfg.LB.RefreshIntervalSec)*time.Second,
+		time.Duration(cfg.LB.RefreshActiveWindowSec)*time.Second,
+		cfg.LB.RefreshWorkers,
+	)
 
 	oai := &openai.Handlers{
 		Post:    exec.Post,
@@ -169,26 +187,28 @@ func main() {
 	}
 
 	adm := &admin.Handlers{
-		Store:    store,
-		Tokens:   exec,
-		OAuth:    oauth,
-		Config:   cfg,
-		AdminKey: adminKey,
-		Version:  version,
-		MaxBody:  cfg.Limits.MaxBodyBytes,
+		Store:           store,
+		Tokens:          exec,
+		OAuth:           oauth,
+		Config:          cfg,
+		AdminKey:        adminKey,
+		Version:         version,
+		MaxBody:         cfg.Limits.MaxBodyBytes,
+		RuntimeSettings: runtimeSettings,
 	}
 
 	handler := httpserver.New(httpserver.Options{
-		Config:    cfg,
-		AdminKey:  adminKey,
-		Store:     store,
-		OpenAI:    oai,
-		Anthropic: anth,
-		Admin:     adm,
-		ModelList: exec,
-		Version:   version,
-		Logger:    logger,
-		Metrics:   metrics,
+		Config:          cfg,
+		AdminKey:        adminKey,
+		Store:           store,
+		OpenAI:          oai,
+		Anthropic:       anth,
+		Admin:           adm,
+		ModelList:       exec,
+		Version:         version,
+		Logger:          logger,
+		Metrics:         metrics,
+		RuntimeSettings: runtimeSettings,
 	})
 
 	addr := cfg.Listen
@@ -220,9 +240,9 @@ func fail(logger *slog.Logger, event string, err error) {
 	os.Exit(1)
 }
 
-func newLogger(level string) *slog.Logger {
-	var selected slog.Level
-	switch strings.ToLower(strings.TrimSpace(level)) {
+func setLogLevel(level *slog.LevelVar, value string) {
+	selected := slog.LevelInfo
+	switch strings.ToLower(strings.TrimSpace(value)) {
 	case "debug":
 		selected = slog.LevelDebug
 	case "warn", "warning":
@@ -232,7 +252,11 @@ func newLogger(level string) *slog.Logger {
 	default:
 		selected = slog.LevelInfo
 	}
-	return slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: selected}))
+	level.Set(selected)
+}
+
+func newLogger(level *slog.LevelVar) *slog.Logger {
+	return slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: level}))
 }
 
 func defaultConfigPath() string {

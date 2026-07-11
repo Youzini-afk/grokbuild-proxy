@@ -74,6 +74,7 @@ flowchart TD
 | `internal/lb` | Priority round-robin, sticky sessions, cooldown state |
 | `internal/auth` | OAuth discovery, device flow, import, refresh |
 | `internal/storage` | Credentials, client keys, bootstrap metadata, atomic writes |
+| `internal/runtimecfg` | Validated SQLite-backed live settings and change notifications |
 | `internal/upstream` | Grok request headers, models, billing, Responses transport |
 | `internal/admin` | Authenticated management API |
 | `internal/adminui` | Embedded zero-build Admin SPA |

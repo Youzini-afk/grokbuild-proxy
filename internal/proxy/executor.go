@@ -17,6 +17,7 @@ import (
 
 	"github.com/GreyGunG/grokbuild-proxy/internal/auth"
 	"github.com/GreyGunG/grokbuild-proxy/internal/lb"
+	"github.com/GreyGunG/grokbuild-proxy/internal/runtimecfg"
 	"github.com/GreyGunG/grokbuild-proxy/internal/storage"
 	"github.com/GreyGunG/grokbuild-proxy/internal/upstream"
 )
@@ -44,6 +45,10 @@ type credentialSnapshotStore interface {
 
 type credentialUsageRecorder interface {
 	RecordCredentialUsage(id string, usedAt time.Time)
+}
+
+type runtimeSettingsProvider interface {
+	Get() runtimecfg.Settings
 }
 
 // Selector is the subset of lb.Selector used by the executor.
@@ -96,6 +101,8 @@ type Executor struct {
 	Refresher TokenRefresher
 	// MaxAttempts caps credential failover. Zero uses DefaultMaxAttempts.
 	MaxAttempts int
+	// RuntimeSettings overrides MaxAttempts when configured.
+	RuntimeSettings runtimeSettingsProvider
 	// Now is optional clock injection for tests.
 	Now func() time.Time
 	// Logger receives credential-selection outcomes without request bodies/tokens.
@@ -127,6 +134,9 @@ func (e *Executor) Post(ctx context.Context, model, convID string, body []byte, 
 	}
 
 	maxAttempts := e.MaxAttempts
+	if e.RuntimeSettings != nil {
+		maxAttempts = e.RuntimeSettings.Get().MaxAttempts
+	}
 	if maxAttempts <= 0 {
 		maxAttempts = DefaultMaxAttempts
 	}

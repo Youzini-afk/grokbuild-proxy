@@ -6,7 +6,9 @@
 - `GET /readyz`: storage and usable credential readiness. Returns 503 when no
   enabled, non-cooling credential with token material is available.
 - `GET /metrics`: low-cardinality Prometheus counters for request count,
-  failures, inflight requests, response bytes, and total latency.
+  failures, inflight requests, response bytes, and total latency. Metrics
+  require the Admin Bearer key by default; anonymous access can be enabled in
+  the Runtime Settings page.
 
 The Admin System page/API includes aggregate pool health. It never exposes
 plaintext OAuth or client secrets.
@@ -21,6 +23,19 @@ outcome, latency and timestamp. Prompts, response bodies and tokens are never
 stored in the statistics tables. Events are queued in memory and committed in
 one-second SQLite batches; the newest 100,000 detailed events are retained while
 per-credential lifetime totals remain in `credential_usage_stats`.
+
+## Runtime settings
+
+The Admin **Runtime Settings** page persists validated overrides in SQLite and
+applies them without a restart. It controls credential failover attempts,
+selection strategy, sticky-session TTL, cooldown bounds, active-token refresh,
+request body/timeout/concurrency/queue limits, log level, and anonymous metrics
+access. `GET/PUT/DELETE /admin/settings` provide the same authenticated API;
+DELETE restores values derived from the process configuration.
+
+Listen address, data directory, upstream/OAuth identity, and bootstrap secrets
+remain startup-only settings. They are intentionally excluded from the live UI
+to prevent an accidental lockout or redirect of credential-bearing traffic.
 
 ## Logs
 

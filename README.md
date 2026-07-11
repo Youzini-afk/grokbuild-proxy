@@ -40,6 +40,7 @@ OpenAI 兼容客户端。
 - Grok CLI 凭据导入和浏览器 OAuth Device Login
 - SQLite WAL 事务存储，支持旧 JSON 自动迁移和大规模账号池
 - CPA 风格调用统计：全局趋势、成功率、模型分布及账号最近调用点阵
+- 可持久化运行设置 UI：重试、负载均衡、冷却、刷新、请求限制、日志和 Metrics 访问控制
 - 内嵌 Admin Web UI
 - 健康检查、Readiness、Prometheus 指标、Request ID 和结构化日志
 - 多平台归档、校验和、SBOM 与 GHCR 容器镜像

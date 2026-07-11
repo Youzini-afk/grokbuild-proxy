@@ -3,6 +3,7 @@ package proxy
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -15,6 +16,7 @@ import (
 	"github.com/GreyGunG/grokbuild-proxy/internal/auth"
 	"github.com/GreyGunG/grokbuild-proxy/internal/config"
 	"github.com/GreyGunG/grokbuild-proxy/internal/lb"
+	"github.com/GreyGunG/grokbuild-proxy/internal/runtimecfg"
 	"github.com/GreyGunG/grokbuild-proxy/internal/storage"
 	"github.com/GreyGunG/grokbuild-proxy/internal/upstream"
 )
@@ -234,6 +236,46 @@ func TestExecutorPersistentStoreUsageIsImmediatelyVisible(t *testing.T) {
 	usage := store.CredentialUsage(credential.ID)
 	if usage.TotalCount != 1 || usage.LastStatus != http.StatusOK || usage.LastModel != "grok-4.5" {
 		t.Fatalf("credential usage=%+v", usage)
+	}
+}
+
+func TestExecutorUsesRuntimeMaxAttempts(t *testing.T) {
+	var calls atomic.Int64
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		calls.Add(1)
+		w.WriteHeader(http.StatusServiceUnavailable)
+		_, _ = w.Write([]byte(`{"error":"temporary"}`))
+	}))
+	t.Cleanup(srv.Close)
+
+	credentials := make([]storage.Credential, 5)
+	for i := range credentials {
+		credentials[i] = storage.Credential{
+			ID: fmt.Sprintf("cred-runtime-%d", i), AccessToken: fmt.Sprintf("access-%d", i),
+			Enabled: true, Priority: 100,
+		}
+	}
+	settings, err := runtimecfg.New(nil, runtimecfg.Defaults(config.Default()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	next := settings.Get()
+	next.MaxAttempts = 5
+	if err := settings.Update(next); err != nil {
+		t.Fatal(err)
+	}
+	executor := &Executor{
+		Store: newMemStore(credentials...), Selector: lb.New(config.Default().LB),
+		Upstream:  upstream.NewClient(upstream.Config{BaseURL: srv.URL + "/v1", HTTPClient: srv.Client()}),
+		Refresher: passthroughRefresher{}, MaxAttempts: 1, RuntimeSettings: settings,
+	}
+	resp, err := executor.Post(context.Background(), "grok-4.5", "", []byte(`{"model":"grok-4.5"}`), false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = resp.Body.Close()
+	if got := calls.Load(); got != 5 {
+		t.Fatalf("upstream calls=%d want 5", got)
 	}
 }
 

@@ -228,12 +228,14 @@
     show($("page-dashboard"), route === "dashboard");
     show($("page-credentials"), route === "credentials");
     show($("page-clients"), route === "clients");
+    show($("page-settings"), route === "settings");
     show($("page-system"), route === "system");
     show($("page-integration"), route === "integration");
 
     if (route === "dashboard") loadDashboard();
     else if (route === "credentials") loadCredentials();
     else if (route === "clients") loadClients();
+    else if (route === "settings") loadSettings();
     else if (route === "system") loadSystem();
     else if (route === "integration") renderIntegration();
   }
@@ -1308,6 +1310,97 @@
     dl.appendChild(el("dd", "", v == null || v === "" ? "—" : String(v)));
   }
 
+  // ---------- Runtime settings ----------
+
+  function settingValue(id, value) {
+    var input = $(id);
+    if (input) input.value = value == null ? "" : String(value);
+  }
+
+  function loadSettings() {
+    setText($("settings-status"), "加载中…");
+    api("GET", "/admin/settings")
+      .then(function (data) {
+        var settings = (data && data.settings) || {};
+        var lb = settings.load_balancing || {};
+        var refresh = settings.refresh || {};
+        var limits = settings.limits || {};
+        settingValue("settings-max-attempts", settings.max_attempts);
+        settingValue("settings-log-level", settings.log_level);
+        settingValue("settings-strategy", lb.strategy);
+        settingValue("settings-sticky-ttl", lb.sticky_ttl_sec);
+        settingValue("settings-cooldown-base", lb.cooldown_base_sec);
+        settingValue("settings-cooldown-max", lb.cooldown_max_sec);
+        settingValue("settings-refresh-workers", refresh.workers);
+        settingValue("settings-refresh-interval", refresh.interval_sec);
+        settingValue("settings-refresh-window", refresh.active_window_sec);
+        settingValue("settings-max-concurrent", limits.max_concurrent);
+        settingValue("settings-queue-wait", limits.queue_wait_ms);
+        settingValue("settings-timeout", limits.request_timeout_sec);
+        settingValue("settings-max-body", Math.round(Number(limits.max_body_bytes || 0) / 1048576));
+        var metrics = $("settings-metrics-public");
+        if (metrics) metrics.checked = !!settings.metrics_public;
+        setText($("settings-status"), "当前设置已加载；保存后立即生效。");
+      })
+      .catch(function (err) {
+        setText($("settings-status"), err.message || "设置加载失败");
+        toast("加载运行设置失败: " + err.message, "err");
+      });
+  }
+
+  function numericSetting(id) {
+    var input = $(id);
+    return Number(input && input.value);
+  }
+
+  function saveSettings(event) {
+    if (event) event.preventDefault();
+    var form = $("settings-form");
+    if (form && !form.reportValidity()) return;
+    var button = $("btn-settings-save");
+    if (button) button.disabled = true;
+    var settings = {
+      max_attempts: numericSetting("settings-max-attempts"),
+      metrics_public: !!($("settings-metrics-public") && $("settings-metrics-public").checked),
+      log_level: ($("settings-log-level") && $("settings-log-level").value) || "info",
+      load_balancing: {
+        strategy: ($("settings-strategy") && $("settings-strategy").value) || "priority_rr",
+        sticky_ttl_sec: numericSetting("settings-sticky-ttl"),
+        cooldown_base_sec: numericSetting("settings-cooldown-base"),
+        cooldown_max_sec: numericSetting("settings-cooldown-max")
+      },
+      refresh: {
+        workers: numericSetting("settings-refresh-workers"),
+        interval_sec: numericSetting("settings-refresh-interval"),
+        active_window_sec: numericSetting("settings-refresh-window")
+      },
+      limits: {
+        max_body_bytes: numericSetting("settings-max-body") * 1048576,
+        request_timeout_sec: numericSetting("settings-timeout"),
+        max_concurrent: numericSetting("settings-max-concurrent"),
+        queue_wait_ms: numericSetting("settings-queue-wait")
+      }
+    };
+    api("PUT", "/admin/settings", settings)
+      .then(function () {
+        toast("运行设置已保存并立即生效", "ok");
+        setText($("settings-status"), "已保存于 " + new Date().toLocaleTimeString());
+        loadSettings();
+      })
+      .catch(function (err) { toast("保存设置失败: " + err.message, "err"); })
+      .finally(function () { if (button) button.disabled = false; });
+  }
+
+  function resetSettings() {
+    if (!window.confirm("恢复配置文件中的默认运行设置？")) return;
+    api("DELETE", "/admin/settings")
+      .then(function () {
+        toast("已恢复默认运行设置", "ok");
+        loadSettings();
+      })
+      .catch(function (err) { toast("恢复默认失败: " + err.message, "err"); });
+  }
+
   // ---------- Integration ----------
 
   function renderIntegration() {
@@ -1440,6 +1533,13 @@
     if (sysRefresh) sysRefresh.addEventListener("click", loadSystem);
     var sysBackup = $("btn-system-backup");
     if (sysBackup) sysBackup.addEventListener("click", createSystemBackup);
+
+    var settingsForm = $("settings-form");
+    if (settingsForm) settingsForm.addEventListener("submit", saveSettings);
+    var settingsReload = $("btn-settings-reload");
+    if (settingsReload) settingsReload.addEventListener("click", loadSettings);
+    var settingsReset = $("btn-settings-reset");
+    if (settingsReset) settingsReset.addEventListener("click", resetSettings);
 
     var copyInt = $("btn-copy-integration");
     if (copyInt) copyInt.addEventListener("click", copyIntegration);

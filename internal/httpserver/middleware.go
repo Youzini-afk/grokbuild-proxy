@@ -11,6 +11,7 @@ import (
 
 	"github.com/GreyGunG/grokbuild-proxy/internal/anthropic"
 	"github.com/GreyGunG/grokbuild-proxy/internal/openai"
+	"github.com/GreyGunG/grokbuild-proxy/internal/runtimecfg"
 )
 
 // ClientAuthenticator validates client API keys (not admin).
@@ -18,6 +19,10 @@ type ClientAuthenticator interface {
 	// AuthenticateClient returns true when the plaintext key is a valid client key.
 	// Bootstrap api_key and hashed client keys both count.
 	AuthenticateClient(plaintext string) (ok bool, err error)
+}
+
+type RuntimeSettings interface {
+	Get() runtimecfg.Settings
 }
 
 // Middleware holds shared middleware dependencies.
@@ -29,12 +34,14 @@ type Middleware struct {
 	MaxConcurrent int
 	QueueWait     time.Duration
 	// RequestTimeout bounds the complete request, including upstream streaming.
-	RequestTimeout time.Duration
-	Logger         *slog.Logger
-	Metrics        *Metrics
+	RequestTimeout  time.Duration
+	Logger          *slog.Logger
+	Metrics         *Metrics
+	RuntimeSettings RuntimeSettings
 
+	semMu    sync.Mutex
 	sem      chan struct{}
-	semOnce  sync.Once
+	semCap   int
 	inflight atomic.Int64
 }
 
@@ -42,22 +49,35 @@ type Middleware struct {
 // which would terminate SSE writes without a protocol-level error.
 func (m *Middleware) Timeout(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if m == nil || m.RequestTimeout <= 0 {
+		if m == nil {
 			next.ServeHTTP(w, r)
 			return
 		}
-		ctx, cancel := context.WithTimeout(r.Context(), m.RequestTimeout)
+		timeout := m.RequestTimeout
+		if m.RuntimeSettings != nil {
+			timeout = time.Duration(m.RuntimeSettings.Get().Limits.RequestTimeoutSec) * time.Second
+		}
+		if timeout <= 0 {
+			next.ServeHTTP(w, r)
+			return
+		}
+		ctx, cancel := context.WithTimeout(r.Context(), timeout)
 		defer cancel()
 		next.ServeHTTP(w, r.WithContext(ctx))
 	})
 }
 
-func (m *Middleware) ensureSem() {
-	m.semOnce.Do(func() {
-		if m.MaxConcurrent > 0 {
-			m.sem = make(chan struct{}, m.MaxConcurrent)
-		}
-	})
+func (m *Middleware) semaphore(maxConcurrent int) chan struct{} {
+	if maxConcurrent <= 0 {
+		return nil
+	}
+	m.semMu.Lock()
+	defer m.semMu.Unlock()
+	if m.sem == nil || m.semCap != maxConcurrent {
+		m.sem = make(chan struct{}, maxConcurrent)
+		m.semCap = maxConcurrent
+	}
+	return m.sem
 }
 
 // extractAPIKey reads Authorization: Bearer or x-api-key.
@@ -124,22 +144,28 @@ func (m *Middleware) RequireClient(next http.Handler) http.Handler {
 // LimitConcurrency rejects with 503 when MaxConcurrent in-flight requests are active.
 func (m *Middleware) LimitConcurrency(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		m.ensureSem()
-		if m.sem == nil {
+		maxConcurrent := m.MaxConcurrent
+		wait := m.QueueWait
+		if m.RuntimeSettings != nil {
+			limits := m.RuntimeSettings.Get().Limits
+			maxConcurrent = limits.MaxConcurrent
+			wait = time.Duration(limits.QueueWaitMS) * time.Millisecond
+		}
+		sem := m.semaphore(maxConcurrent)
+		if sem == nil {
 			next.ServeHTTP(w, r)
 			return
 		}
-		wait := m.QueueWait
 		if wait <= 0 {
 			wait = time.Nanosecond
 		}
 		timer := time.NewTimer(wait)
 		defer timer.Stop()
 		select {
-		case m.sem <- struct{}{}:
+		case sem <- struct{}{}:
 			m.inflight.Add(1)
 			defer func() {
-				<-m.sem
+				<-sem
 				m.inflight.Add(-1)
 			}()
 			next.ServeHTTP(w, r)
@@ -155,8 +181,12 @@ func (m *Middleware) LimitConcurrency(next http.Handler) http.Handler {
 // LimitBody wraps the request body with MaxBytesReader when MaxBody > 0.
 func (m *Middleware) LimitBody(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if m.MaxBody > 0 && r.Body != nil {
-			r.Body = http.MaxBytesReader(w, r.Body, m.MaxBody)
+		maxBody := m.MaxBody
+		if m.RuntimeSettings != nil {
+			maxBody = m.RuntimeSettings.Get().Limits.MaxBodyBytes
+		}
+		if maxBody > 0 && r.Body != nil {
+			r.Body = http.MaxBytesReader(w, r.Body, maxBody)
 		}
 		next.ServeHTTP(w, r)
 	})

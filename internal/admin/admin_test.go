@@ -16,6 +16,7 @@ import (
 
 	"github.com/GreyGunG/grokbuild-proxy/internal/auth"
 	"github.com/GreyGunG/grokbuild-proxy/internal/config"
+	"github.com/GreyGunG/grokbuild-proxy/internal/runtimecfg"
 	"github.com/GreyGunG/grokbuild-proxy/internal/storage"
 )
 
@@ -494,6 +495,42 @@ func TestUsageSummaryAndCredentialListIncludeCallStats(t *testing.T) {
 	h.ListCredentials(rr, httptest.NewRequest(http.MethodGet, "/admin/credentials", nil))
 	if rr.Code != http.StatusOK || !strings.Contains(rr.Body.String(), `"success_count":1`) || !strings.Contains(rr.Body.String(), `"last_model":"grok-4.5"`) {
 		t.Fatalf("list status=%d body=%s", rr.Code, rr.Body.String())
+	}
+}
+
+func TestRuntimeSettingsAPIUpdatesAndResets(t *testing.T) {
+	store, err := storage.New(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	defaults := runtimecfg.Defaults(config.Default())
+	manager, err := runtimecfg.New(store, defaults)
+	if err != nil {
+		t.Fatal(err)
+	}
+	h := &Handlers{Store: store, AdminKey: "admin-secret", RuntimeSettings: manager}
+	handler := h.Handler()
+
+	next := defaults
+	next.MaxAttempts = 8
+	next.MetricsPublic = true
+	next.Limits.MaxConcurrent = 128
+	body, _ := json.Marshal(next)
+	req := httptest.NewRequest(http.MethodPut, "/admin/settings", bytes.NewReader(body))
+	req.Header.Set("Authorization", "Bearer admin-secret")
+	rr := httptest.NewRecorder()
+	handler.ServeHTTP(rr, req)
+	if rr.Code != http.StatusOK || manager.Get().MaxAttempts != 8 || manager.Get().Limits.MaxConcurrent != 128 {
+		t.Fatalf("update status=%d body=%s settings=%+v", rr.Code, rr.Body.String(), manager.Get())
+	}
+
+	req = httptest.NewRequest(http.MethodDelete, "/admin/settings", nil)
+	req.Header.Set("Authorization", "Bearer admin-secret")
+	rr = httptest.NewRecorder()
+	handler.ServeHTTP(rr, req)
+	if rr.Code != http.StatusOK || manager.Get() != defaults {
+		t.Fatalf("reset status=%d body=%s settings=%+v", rr.Code, rr.Body.String(), manager.Get())
 	}
 }
 

@@ -12,23 +12,35 @@ import (
 // credentials remain demand-driven, avoiding a refresh storm for large pools.
 // It blocks until ctx is cancelled and is intended to run in one goroutine.
 func (e *Executor) RunRefreshScheduler(ctx context.Context, interval, activeWindow time.Duration, workers int) {
-	if e == nil || e.Store == nil || e.Refresher == nil || workers <= 0 || interval <= 0 {
+	if e == nil || e.Store == nil || e.Refresher == nil {
 		return
 	}
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	if activeWindow <= 0 {
-		activeWindow = 30 * time.Minute
-	}
-	ticker := time.NewTicker(interval)
-	defer ticker.Stop()
 	for {
+		currentInterval, currentWindow, currentWorkers := interval, activeWindow, workers
+		if e.RuntimeSettings != nil {
+			refresh := e.RuntimeSettings.Get().Refresh
+			currentInterval = time.Duration(refresh.IntervalSec) * time.Second
+			currentWindow = time.Duration(refresh.ActiveWindowSec) * time.Second
+			currentWorkers = refresh.Workers
+		}
+		if currentInterval <= 0 {
+			currentInterval = 30 * time.Second
+		}
+		if currentWindow <= 0 {
+			currentWindow = 30 * time.Minute
+		}
+		timer := time.NewTimer(currentInterval)
 		select {
 		case <-ctx.Done():
+			timer.Stop()
 			return
-		case <-ticker.C:
-			e.refreshActiveCredentials(ctx, activeWindow, workers)
+		case <-timer.C:
+			if currentWorkers > 0 {
+				e.refreshActiveCredentials(ctx, currentWindow, currentWorkers)
+			}
 		}
 	}
 }

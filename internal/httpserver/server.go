@@ -39,9 +39,10 @@ type Options struct {
 	Admin     *admin.Handlers
 	ModelList ModelLister
 	// Version shown on GET /
-	Version string
-	Logger  *slog.Logger
-	Metrics *Metrics
+	Version         string
+	Logger          *slog.Logger
+	Metrics         *Metrics
+	RuntimeSettings RuntimeSettings
 }
 
 // clientAuth implements ClientAuthenticator.
@@ -71,13 +72,14 @@ func New(opts Options) http.Handler {
 		Clients: clientAuth{
 			store: opts.Store,
 		},
-		AdminKey:       opts.AdminKey,
-		MaxBody:        opts.Config.Limits.MaxBodyBytes,
-		MaxConcurrent:  opts.Config.Limits.MaxConcurrent,
-		QueueWait:      time.Duration(opts.Config.Limits.QueueWaitMS) * time.Millisecond,
-		RequestTimeout: opts.Config.RequestTimeout(),
-		Logger:         opts.Logger,
-		Metrics:        metrics,
+		AdminKey:        opts.AdminKey,
+		MaxBody:         opts.Config.Limits.MaxBodyBytes,
+		MaxConcurrent:   opts.Config.Limits.MaxConcurrent,
+		QueueWait:       time.Duration(opts.Config.Limits.QueueWaitMS) * time.Millisecond,
+		RequestTimeout:  opts.Config.RequestTimeout(),
+		Logger:          opts.Logger,
+		Metrics:         metrics,
+		RuntimeSettings: opts.RuntimeSettings,
 	}
 
 	mux := http.NewServeMux()
@@ -98,7 +100,7 @@ func New(opts Options) http.Handler {
 		}
 		handleReadyz(w, r, opts.Store)
 	})
-	mux.Handle("/metrics", metrics.Handler())
+	mux.Handle("/metrics", metricsRoute(metrics, opts.AdminKey, opts.RuntimeSettings))
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/" {
 			http.NotFound(w, r)
@@ -147,6 +149,23 @@ func New(opts Options) http.Handler {
 	}
 
 	return mw.Observe(mw.Timeout(mux))
+}
+
+func metricsRoute(metrics *Metrics, adminKey string, settings RuntimeSettings) http.Handler {
+	handler := metrics.Handler()
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if settings == nil || settings.Get().MetricsPublic {
+			handler.ServeHTTP(w, r)
+			return
+		}
+		key := extractAPIKey(r)
+		if key == "" || adminKey == "" || !constantTimeEq(key, adminKey) {
+			w.Header().Set("WWW-Authenticate", `Bearer realm="metrics"`)
+			http.Error(w, "metrics authentication required", http.StatusUnauthorized)
+			return
+		}
+		handler.ServeHTTP(w, r)
+	})
 }
 
 // NewServer builds an *http.Server with sensible timeouts.

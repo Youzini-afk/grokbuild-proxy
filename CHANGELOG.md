@@ -21,6 +21,9 @@ Versioning and keeps the latest release under GitHub Releases.
 - CPA-style call dashboard with per-account success/failure totals, recent
   outcome timelines, latency, model distribution, hourly trends and recent
   request activity.
+- SQLite-backed runtime settings UI and API with immediate retry, load
+  balancing, cooldown, refresh, request-limit, logging, and metrics-access
+  updates.
 
 ### Changed
 
@@ -30,6 +33,8 @@ Versioning and keeps the latest release under GitHub Releases.
 - Regional model errors no longer consume multiple credential attempts.
 - API/admin/data-directory settings can be supplied through `API_KEY`,
   `ADMIN_KEY`, and `DATA_DIR`.
+- Prometheus metrics require Admin Bearer authentication by default and can be
+  made public explicitly from Runtime Settings.
 
 ### Fixed
 

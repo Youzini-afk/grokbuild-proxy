@@ -54,6 +54,23 @@ func TestAvailable_FiltersDisabledAndCooldown(t *testing.T) {
 	}
 }
 
+func TestApplyConfigUpdatesLiveSelector(t *testing.T) {
+	selector := New(testCfg("priority_rr"))
+	next := testCfg("round_robin")
+	next.StickyTTLSec = 0
+	next.Cooldown.BaseSec = 45
+	next.Cooldown.MaxSec = 900
+	selector.ApplyConfig(next)
+
+	selector.mu.Lock()
+	defer selector.mu.Unlock()
+	if selector.strategy != "round_robin" || selector.stickyTTL != 0 ||
+		selector.cooldownBase != 45*time.Second || selector.cooldownMax != 900*time.Second {
+		t.Fatalf("selector config strategy=%s sticky=%s base=%s max=%s",
+			selector.strategy, selector.stickyTTL, selector.cooldownBase, selector.cooldownMax)
+	}
+}
+
 func TestPick_NoAvailable(t *testing.T) {
 	s := New(testCfg("priority_rr"))
 	now := time.Now().UTC()

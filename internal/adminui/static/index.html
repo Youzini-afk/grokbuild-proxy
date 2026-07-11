@@ -40,6 +40,7 @@
           <a href="#/dashboard" data-route="dashboard">调用统计</a>
           <a href="#/credentials" data-route="credentials">账号凭证</a>
           <a href="#/clients" data-route="clients">客户端密钥</a>
+          <a href="#/settings" data-route="settings">运行设置</a>
           <a href="#/system" data-route="system">系统信息</a>
           <a href="#/integration" data-route="integration">接入示例</a>
         </nav>
@@ -152,6 +153,130 @@
             </div>
           </div>
           <div id="system-body" class="card stack"></div>
+        </section>
+
+        <section id="page-settings" class="page hidden">
+          <div class="page-head">
+            <div>
+              <h2>运行设置</h2>
+              <p class="muted">保存后立即生效并持久化到 SQLite；无需重新部署</p>
+            </div>
+            <div class="row gap">
+              <button type="button" class="btn" id="btn-settings-reload">重新加载</button>
+              <button type="button" class="btn btn-danger" id="btn-settings-reset">恢复默认</button>
+              <button type="submit" form="settings-form" class="btn btn-primary" id="btn-settings-save">保存设置</button>
+            </div>
+          </div>
+          <form id="settings-form" class="settings-layout">
+            <article class="card settings-card">
+              <div class="settings-card-head">
+                <h3>请求重试</h3>
+                <p class="muted">一个请求最多切换多少个不同账号</p>
+              </div>
+              <label class="field">
+                <span class="label">最大账号尝试次数</span>
+                <input id="settings-max-attempts" type="number" min="1" max="20" required />
+                <small class="muted">建议大凭证池使用 6–10；过高会增加失败请求延迟。</small>
+              </label>
+            </article>
+
+            <article class="card settings-card">
+              <div class="settings-card-head">
+                <h3>负载均衡</h3>
+                <p class="muted">账号选择、会话粘性和失败冷却</p>
+              </div>
+              <div class="settings-grid">
+                <label class="field">
+                  <span class="label">选择策略</span>
+                  <select id="settings-strategy">
+                    <option value="priority_rr">优先级轮询</option>
+                    <option value="round_robin">全局轮询</option>
+                  </select>
+                </label>
+                <label class="field">
+                  <span class="label">粘性会话 TTL（秒）</span>
+                  <input id="settings-sticky-ttl" type="number" min="0" max="604800" required />
+                </label>
+                <label class="field">
+                  <span class="label">基础冷却（秒）</span>
+                  <input id="settings-cooldown-base" type="number" min="1" max="86400" required />
+                </label>
+                <label class="field">
+                  <span class="label">最大冷却（秒）</span>
+                  <input id="settings-cooldown-max" type="number" min="1" max="604800" required />
+                </label>
+              </div>
+            </article>
+
+            <article class="card settings-card">
+              <div class="settings-card-head">
+                <h3>请求限制</h3>
+                <p class="muted">保护服务内存与上游连接</p>
+              </div>
+              <div class="settings-grid">
+                <label class="field">
+                  <span class="label">最大并发请求</span>
+                  <input id="settings-max-concurrent" type="number" min="1" max="1024" required />
+                </label>
+                <label class="field">
+                  <span class="label">排队等待（毫秒）</span>
+                  <input id="settings-queue-wait" type="number" min="0" max="60000" required />
+                </label>
+                <label class="field">
+                  <span class="label">请求超时（秒）</span>
+                  <input id="settings-timeout" type="number" min="10" max="3600" required />
+                </label>
+                <label class="field">
+                  <span class="label">最大请求体（MiB）</span>
+                  <input id="settings-max-body" type="number" min="1" max="256" required />
+                </label>
+              </div>
+            </article>
+
+            <article class="card settings-card">
+              <div class="settings-card-head">
+                <h3>令牌刷新</h3>
+                <p class="muted">仅预刷新最近使用且即将过期的账号</p>
+              </div>
+              <div class="settings-grid">
+                <label class="field">
+                  <span class="label">刷新工作线程</span>
+                  <input id="settings-refresh-workers" type="number" min="0" max="64" required />
+                  <small class="muted">设为 0 可停用后台预刷新。</small>
+                </label>
+                <label class="field">
+                  <span class="label">扫描间隔（秒）</span>
+                  <input id="settings-refresh-interval" type="number" min="5" max="3600" required />
+                </label>
+                <label class="field">
+                  <span class="label">活跃窗口（秒）</span>
+                  <input id="settings-refresh-window" type="number" min="60" max="604800" required />
+                </label>
+                <label class="field">
+                  <span class="label">日志级别</span>
+                  <select id="settings-log-level">
+                    <option value="debug">Debug</option>
+                    <option value="info">Info</option>
+                    <option value="warn">Warn</option>
+                    <option value="error">Error</option>
+                  </select>
+                </label>
+              </div>
+            </article>
+
+            <article class="card settings-card">
+              <div class="settings-card-head">
+                <h3>监控访问</h3>
+                <p class="muted">控制 Prometheus 指标是否允许匿名读取</p>
+              </div>
+              <label class="switch-field">
+                <input id="settings-metrics-public" type="checkbox" />
+                <span>公开访问 <code>/metrics</code></span>
+              </label>
+              <p class="muted">关闭时需要使用管理员 Bearer Key；建议公网部署保持关闭。</p>
+            </article>
+          </form>
+          <p id="settings-status" class="muted settings-status"></p>
         </section>
 
         <section id="page-integration" class="page hidden">

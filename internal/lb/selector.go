@@ -94,6 +94,35 @@ func New(cfg config.LBConfig) *Selector {
 	}
 }
 
+// ApplyConfig updates scheduling behavior without discarding health state or
+// rebuilding the credential pool.
+func (s *Selector) ApplyConfig(cfg config.LBConfig) {
+	if s == nil {
+		return
+	}
+	strategy := cfg.Strategy
+	if strategy == "" {
+		strategy = "priority_rr"
+	}
+	base := time.Duration(cfg.Cooldown.BaseSec) * time.Second
+	max := time.Duration(cfg.Cooldown.MaxSec) * time.Second
+	if base <= 0 {
+		base = 300 * time.Second
+	}
+	if max <= 0 {
+		max = 3600 * time.Second
+	}
+	s.mu.Lock()
+	s.strategy = strategy
+	s.stickyTTL = time.Duration(cfg.StickyTTLSec) * time.Second
+	s.cooldownBase = base
+	s.cooldownMax = max
+	if s.stickyTTL <= 0 {
+		s.sticky = make(map[string]stickyBinding)
+	}
+	s.mu.Unlock()
+}
+
 // SyncCredentials rebuilds the immutable scheduling index only when the store
 // snapshot version changes. Normal picks are then O(number of skipped peers)
 // rather than O(total credentials).

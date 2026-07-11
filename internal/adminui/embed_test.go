@@ -42,6 +42,12 @@ func TestEmbeddedDashboardAssetsPresent(t *testing.T) {
 	if !strings.Contains(string(styles), ".trend-chart") {
 		t.Fatal("dashboard styles missing from embedded CSS")
 	}
+	if !strings.Contains(string(index), `id="page-settings"`) || !strings.Contains(string(index), `id="settings-max-attempts"`) {
+		t.Fatal("runtime settings form missing from embedded index")
+	}
+	if !strings.Contains(string(app), "/admin/settings") {
+		t.Fatal("runtime settings API missing from embedded app")
+	}
 }
 
 func TestIndexHandlerServesHTMLWithoutAuth(t *testing.T) {

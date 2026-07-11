@@ -14,6 +14,7 @@ import (
 	"github.com/GreyGunG/grokbuild-proxy/internal/admin"
 	"github.com/GreyGunG/grokbuild-proxy/internal/anthropic"
 	"github.com/GreyGunG/grokbuild-proxy/internal/config"
+	"github.com/GreyGunG/grokbuild-proxy/internal/runtimecfg"
 	"github.com/GreyGunG/grokbuild-proxy/internal/storage"
 )
 
@@ -186,6 +187,38 @@ func TestReadinessMetricsAndRequestID(t *testing.T) {
 	if !strings.Contains(logs.String(), `"route":"/readyz"`) ||
 		!strings.Contains(logs.String(), `"request_id":"contract-ready-1"`) {
 		t.Fatalf("structured logs=%s", logs.String())
+	}
+}
+
+func TestMetricsCanRequireAdminAndChangeAtRuntime(t *testing.T) {
+	settings, err := runtimecfg.New(nil, runtimecfg.Defaults(config.Default()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	h := New(Options{Config: config.Default(), AdminKey: "admin-secret", RuntimeSettings: settings})
+
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, httptest.NewRequest(http.MethodGet, "/metrics", nil))
+	if rr.Code != http.StatusUnauthorized {
+		t.Fatalf("private metrics status=%d body=%s", rr.Code, rr.Body.String())
+	}
+	req := httptest.NewRequest(http.MethodGet, "/metrics", nil)
+	req.Header.Set("Authorization", "Bearer admin-secret")
+	rr = httptest.NewRecorder()
+	h.ServeHTTP(rr, req)
+	if rr.Code != http.StatusOK || !strings.Contains(rr.Body.String(), "grokbuild_http_requests_total") {
+		t.Fatalf("authenticated metrics status=%d body=%s", rr.Code, rr.Body.String())
+	}
+
+	next := settings.Get()
+	next.MetricsPublic = true
+	if err := settings.Update(next); err != nil {
+		t.Fatal(err)
+	}
+	rr = httptest.NewRecorder()
+	h.ServeHTTP(rr, httptest.NewRequest(http.MethodGet, "/metrics", nil))
+	if rr.Code != http.StatusOK {
+		t.Fatalf("public metrics status=%d body=%s", rr.Code, rr.Body.String())
 	}
 }
 

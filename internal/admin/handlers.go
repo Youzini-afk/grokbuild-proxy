@@ -14,6 +14,7 @@ import (
 
 	"github.com/GreyGunG/grokbuild-proxy/internal/auth"
 	"github.com/GreyGunG/grokbuild-proxy/internal/config"
+	"github.com/GreyGunG/grokbuild-proxy/internal/runtimecfg"
 	"github.com/GreyGunG/grokbuild-proxy/internal/storage"
 	"github.com/GreyGunG/grokbuild-proxy/internal/upstream"
 )
@@ -60,6 +61,13 @@ type usageProvider interface {
 	UsageSummaryHours(hours int) (storage.UsageSummary, error)
 }
 
+type RuntimeSettingsManager interface {
+	Get() runtimecfg.Settings
+	Defaults() runtimecfg.Settings
+	Update(runtimecfg.Settings) error
+	Reset() error
+}
+
 // TokenService refreshes credentials and fetches billing.
 type TokenService interface {
 	ForceRefreshToken(ctx context.Context, credID string) (auth.TokenSet, storage.Credential, error)
@@ -77,7 +85,8 @@ type Handlers struct {
 	// Version overrides package Version when non-empty.
 	Version string
 	// MaxBody limits JSON body size.
-	MaxBody int64
+	MaxBody         int64
+	RuntimeSettings RuntimeSettingsManager
 
 	deviceMu       sync.Mutex
 	deviceSessions map[string]deviceSession
@@ -626,7 +635,54 @@ func (h *Handlers) System(w http.ResponseWriter, r *http.Request) {
 	if provider, ok := h.Store.(storageStatsProvider); ok {
 		response["storage"] = provider.Stats()
 	}
+	if h.RuntimeSettings != nil {
+		response["runtime_settings"] = h.RuntimeSettings.Get()
+	}
 	writeJSON(w, http.StatusOK, response)
+}
+
+// RuntimeSettings GET /admin/settings
+func (h *Handlers) GetRuntimeSettings(w http.ResponseWriter, r *http.Request) {
+	if h.RuntimeSettings == nil {
+		writeErr(w, http.StatusNotImplemented, "runtime settings unavailable")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"settings":            h.RuntimeSettings.Get(),
+		"defaults":            h.RuntimeSettings.Defaults(),
+		"applies_immediately": true,
+	})
+}
+
+// UpdateRuntimeSettings PUT /admin/settings
+func (h *Handlers) UpdateRuntimeSettings(w http.ResponseWriter, r *http.Request) {
+	if h.RuntimeSettings == nil {
+		writeErr(w, http.StatusNotImplemented, "runtime settings unavailable")
+		return
+	}
+	var settings runtimecfg.Settings
+	if err := decodeJSON(r, min(h.maxBody(), 1<<20), &settings); err != nil {
+		writeErr(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	if err := h.RuntimeSettings.Update(settings); err != nil {
+		writeErr(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"settings": h.RuntimeSettings.Get(), "saved": true})
+}
+
+// ResetRuntimeSettings DELETE /admin/settings
+func (h *Handlers) ResetRuntimeSettings(w http.ResponseWriter, r *http.Request) {
+	if h.RuntimeSettings == nil {
+		writeErr(w, http.StatusNotImplemented, "runtime settings unavailable")
+		return
+	}
+	if err := h.RuntimeSettings.Reset(); err != nil {
+		writeErr(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"settings": h.RuntimeSettings.Get(), "reset": true})
 }
 
 // CreateBackup POST /admin/system/backup creates a verified online snapshot.

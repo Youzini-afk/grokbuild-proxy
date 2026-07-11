@@ -26,6 +26,9 @@ func (h *Handlers) Register(mux *http.ServeMux) {
 	mux.HandleFunc("POST /admin/credentials", h.CreateCredential)
 	mux.HandleFunc("POST /admin/credentials/import-grok", h.ImportGrok)
 	mux.HandleFunc("GET /admin/usage/summary", h.UsageSummary)
+	mux.HandleFunc("GET /admin/settings", h.GetRuntimeSettings)
+	mux.HandleFunc("PUT /admin/settings", h.UpdateRuntimeSettings)
+	mux.HandleFunc("DELETE /admin/settings", h.ResetRuntimeSettings)
 	mux.HandleFunc("GET /admin/import-jobs/{id}", func(w http.ResponseWriter, r *http.Request) {
 		h.GetImportJob(w, r, r.PathValue("id"))
 	})
@@ -89,6 +92,12 @@ func (h *Handlers) dispatchFallback(w http.ResponseWriter, r *http.Request) {
 		h.ImportGrok(w, r)
 	case path == "/admin/usage/summary" && r.Method == http.MethodGet:
 		h.UsageSummary(w, r)
+	case path == "/admin/settings" && r.Method == http.MethodGet:
+		h.GetRuntimeSettings(w, r)
+	case path == "/admin/settings" && r.Method == http.MethodPut:
+		h.UpdateRuntimeSettings(w, r)
+	case path == "/admin/settings" && r.Method == http.MethodDelete:
+		h.ResetRuntimeSettings(w, r)
 	case strings.HasPrefix(path, "/admin/import-jobs/"):
 		id := strings.TrimPrefix(path, "/admin/import-jobs/")
 		if r.Method == http.MethodGet {
