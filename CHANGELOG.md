@@ -31,6 +31,13 @@ Versioning and keeps the latest release under GitHub Releases.
 - API/admin/data-directory settings can be supplied through `API_KEY`,
   `ADMIN_KEY`, and `DATA_DIR`.
 
+### Fixed
+
+- Array imports no longer treat repeated positions such as `entry[0]` as
+  account identities across files. Consecutive batches deduplicate only by
+  stable account identity and can restore older overwritten credentials by
+  re-importing their source batches.
+
 ## [0.1.0] - 2026-07-10
 
 ### Added

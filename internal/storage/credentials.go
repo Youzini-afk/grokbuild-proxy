@@ -423,6 +423,15 @@ func sameCredentialIdentity(c Credential, in CreateCredentialInput) bool {
 	if in.Email != "" && c.Email != "" && strings.EqualFold(c.Email, in.Email) {
 		return in.OIDCClientID == "" || c.OIDCClientID == "" || c.OIDCClientID == in.OIDCClientID
 	}
+	// Never let a weaker source label override conflicting account identity.
+	// This also protects databases containing source_key=entry[N] from older
+	// array imports when the corrected files are re-imported.
+	if in.UserID != "" && c.UserID != "" && in.UserID != c.UserID {
+		return false
+	}
+	if in.Email != "" && c.Email != "" && !strings.EqualFold(in.Email, c.Email) {
+		return false
+	}
 	if in.SourceKey != "" && c.SourceKey == in.SourceKey {
 		return true
 	}

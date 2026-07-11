@@ -215,6 +215,31 @@ func TestBulkUpsertCredentialsSingleCommitAndIdempotent(t *testing.T) {
 	}
 }
 
+func TestBulkUpsertDoesNotUseConflictingArrayPositionAsIdentity(t *testing.T) {
+	s := newTestStore(t)
+	first, created, err := s.UpsertCredential(CreateCredentialInput{
+		UserID: "user-first", Email: "first@example.com", SourceKey: "entry[0]",
+		AccessToken: "access-first", RefreshToken: "refresh-first",
+	})
+	if err != nil || !created {
+		t.Fatalf("first created=%v err=%v", created, err)
+	}
+	second, created, err := s.UpsertCredential(CreateCredentialInput{
+		UserID: "user-second", Email: "second@example.com", SourceKey: "entry[0]",
+		AccessToken: "access-second", RefreshToken: "refresh-second",
+	})
+	if err != nil || !created {
+		t.Fatalf("second created=%v err=%v", created, err)
+	}
+	if first.ID == second.ID {
+		t.Fatalf("conflicting strong identities were merged into %s", first.ID)
+	}
+	credentials, err := s.ListCredentials()
+	if err != nil || len(credentials) != 2 {
+		t.Fatalf("credentials=%d err=%v", len(credentials), err)
+	}
+}
+
 func TestClientKeyCRUDAndHashOnly(t *testing.T) {
 	s := newTestStore(t)
 

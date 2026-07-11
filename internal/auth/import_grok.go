@@ -205,6 +205,10 @@ func ParseGrokAuthJSON(data []byte) ([]ImportedCredential, error) {
 				if err != nil {
 					return nil, err
 				}
+				// Array positions repeat in every import document and therefore are
+				// labels, not stable account identities. Persisting entry[0], entry[1],
+				// ... as source keys can overwrite unrelated accounts in later batches.
+				cred.SourceKey = ""
 				out = append(out, cred)
 			}
 			return out, nil
@@ -223,6 +227,8 @@ func ParseGrokAuthJSON(data []byte) ([]ImportedCredential, error) {
 	if err != nil {
 		return nil, err
 	}
+	// "default" is shared by every bare-entry document and is not an identity.
+	cred.SourceKey = ""
 	return []ImportedCredential{cred}, nil
 }
 

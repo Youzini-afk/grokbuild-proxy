@@ -95,6 +95,28 @@ func TestParseGrokAuthJSON_BareEntry(t *testing.T) {
 	if creds[0].OIDCClientID != DefaultClientID {
 		t.Errorf("default client id missing: %q", creds[0].OIDCClientID)
 	}
+	if creds[0].SourceKey != "" {
+		t.Errorf("bare-entry source key must not be persisted: %q", creds[0].SourceKey)
+	}
+}
+
+func TestParseGrokAuthJSON_ArrayPositionsAreNotSourceIdentities(t *testing.T) {
+	raw := `{"accounts":[
+		{"key":"a1","refresh_token":"r1","user_id":"user-1"},
+		{"key":"a2","refresh_token":"r2","user_id":"user-2"}
+	]}`
+	creds, err := ParseGrokAuthJSON([]byte(raw))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(creds) != 2 {
+		t.Fatalf("credentials=%d", len(creds))
+	}
+	for i, credential := range creds {
+		if credential.SourceKey != "" {
+			t.Fatalf("credential[%d] source key=%q", i, credential.SourceKey)
+		}
+	}
 }
 
 func TestParseGrokAuthJSON_SourceKeyFallback(t *testing.T) {

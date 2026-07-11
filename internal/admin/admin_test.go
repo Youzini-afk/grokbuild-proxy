@@ -326,6 +326,59 @@ func TestImportGrokMultipartJSONFile(t *testing.T) {
 	}
 }
 
+func TestImportGrokConsecutiveArrayBatchesDoNotOverwritePositions(t *testing.T) {
+	store, err := storage.New(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	h := &Handlers{Store: store, MaxBody: 1 << 20}
+
+	makeBatch := func(start int) []byte {
+		accounts := make([]map[string]string, 100)
+		for i := range accounts {
+			n := start + i
+			accounts[i] = map[string]string{
+				"key": fmt.Sprintf("access-%d", n), "refresh_token": fmt.Sprintf("refresh-%d", n),
+				"user_id": fmt.Sprintf("user-%d", n), "email": fmt.Sprintf("user-%d@example.com", n),
+				"oidc_client_id": "client-test",
+			}
+		}
+		body, marshalErr := json.Marshal(map[string]any{"raw": map[string]any{"accounts": accounts}})
+		if marshalErr != nil {
+			t.Fatal(marshalErr)
+		}
+		return body
+	}
+	importBatch := func(body []byte) *httptest.ResponseRecorder {
+		req := httptest.NewRequest(http.MethodPost, "/admin/credentials/import-grok", bytes.NewReader(body))
+		rr := httptest.NewRecorder()
+		h.ImportGrok(rr, req)
+		return rr
+	}
+
+	firstBatch := makeBatch(1)
+	for batchNumber, body := range [][]byte{firstBatch, makeBatch(101)} {
+		rr := importBatch(body)
+		if rr.Code != http.StatusCreated {
+			t.Fatalf("batch %d status=%d body=%s", batchNumber+1, rr.Code, rr.Body.String())
+		}
+	}
+	credentials, err := store.ListCredentials()
+	if err != nil || len(credentials) != 200 {
+		t.Fatalf("after two batches credentials=%d err=%v", len(credentials), err)
+	}
+
+	rr := importBatch(firstBatch)
+	if rr.Code != http.StatusOK || !strings.Contains(rr.Body.String(), `"updated":100`) {
+		t.Fatalf("idempotent reimport status=%d body=%s", rr.Code, rr.Body.String())
+	}
+	credentials, err = store.ListCredentials()
+	if err != nil || len(credentials) != 200 {
+		t.Fatalf("after reimport credentials=%d err=%v", len(credentials), err)
+	}
+}
+
 func TestImportGrokMultipartRejectsOversizedFile(t *testing.T) {
 	h := &Handlers{Store: newFakeStore(), MaxBody: 32}
 	var body bytes.Buffer
