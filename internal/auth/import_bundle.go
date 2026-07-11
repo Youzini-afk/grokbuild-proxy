@@ -16,6 +16,11 @@ const (
 	maxCredentialBundleDepth = 3
 )
 
+type CredentialBundleFile struct {
+	Name string
+	Data []byte
+}
+
 // ParseCredentialBundle auto-detects an uploaded JSON or ZIP credential
 // bundle. ZIP files are parsed in memory and never extracted to disk. Nested
 // ZIPs are supported to accommodate common sub2api export batches.
@@ -44,6 +49,62 @@ func ParseCredentialBundle(filename string, data []byte, maxUncompressed int64) 
 	default:
 		return nil, fmt.Errorf("import credential bundle: file must be .json or .zip")
 	}
+}
+
+// ParseCredentialBundles parses one multipart selection under shared limits
+// and deduplicates rotations across file boundaries.
+func ParseCredentialBundles(files []CredentialBundleFile, maxUncompressed int64) ([]ImportedCredential, error) {
+	if len(files) == 0 {
+		return nil, fmt.Errorf("import credential bundle: no files selected")
+	}
+	if len(files) == 1 {
+		return ParseCredentialBundle(files[0].Name, files[0].Data, maxUncompressed)
+	}
+	if maxUncompressed <= 0 {
+		maxUncompressed = 128 << 20
+	}
+	state := &credentialBundleState{maxBytes: maxUncompressed}
+	credentials := make([]ImportedCredential, 0)
+	var uploadedBytes int64
+	for _, file := range files {
+		uploadedBytes += int64(len(file.Data))
+		if uploadedBytes > maxUncompressed {
+			return nil, fmt.Errorf("import credential bundle: selected files exceed upload limit")
+		}
+		state.files++
+		if state.files > maxCredentialBundleFiles {
+			return nil, fmt.Errorf("import credential bundle: file count exceeds %d", maxCredentialBundleFiles)
+		}
+		extension := strings.ToLower(path.Ext(strings.TrimSpace(file.Name)))
+		switch extension {
+		case ".json":
+			if state.jsonSize+int64(len(file.Data)) > state.maxBytes {
+				return nil, fmt.Errorf("import credential bundle: uncompressed JSON exceeds %d bytes", state.maxBytes)
+			}
+			state.jsonSize += int64(len(file.Data))
+			parsed, err := ParseGrokAuthJSON(file.Data)
+			if err != nil {
+				if errors.Is(err, ErrNoSupportedCredential) || errors.Is(err, ErrRawSSORequiresExchange) {
+					continue
+				}
+				return nil, fmt.Errorf("import credential bundle: parse %q: %w", path.Base(file.Name), err)
+			}
+			credentials = append(credentials, parsed...)
+		case ".zip":
+			parsed, err := state.parseZIP(file.Data, 1, path.Base(file.Name))
+			if err != nil {
+				return nil, err
+			}
+			credentials = append(credentials, parsed...)
+		default:
+			return nil, fmt.Errorf("import credential bundle: file %q must be .json or .zip", path.Base(file.Name))
+		}
+	}
+	credentials = DeduplicateImportedCredentials(credentials)
+	if len(credentials) == 0 {
+		return nil, fmt.Errorf("import credential bundle: no supported Grok/CPA/sub2api credentials found")
+	}
+	return credentials, nil
 }
 
 type credentialBundleState struct {

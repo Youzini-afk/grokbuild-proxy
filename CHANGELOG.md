@@ -28,7 +28,8 @@ Versioning and keeps the latest release under GitHub Releases.
   durable abnormal/quota states, single-flight half-open recovery probes, and
   live Admin UI controls.
 - Automatic Grok, CPA type=xai, and sub2api credential import from JSON or
-  bounded in-memory ZIP bundles, including nested export ZIPs.
+  bounded in-memory ZIP bundles, including nested export ZIPs and up to 10,000
+  files per picker selection.
 
 ### Changed
 

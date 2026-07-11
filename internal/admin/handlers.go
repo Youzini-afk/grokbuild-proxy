@@ -96,6 +96,8 @@ type Handlers struct {
 	importSem      chan struct{}
 }
 
+const maxCredentialUploadFiles = 10_000
+
 // maskedCredential is a credential view with secrets redacted.
 type maskedCredential struct {
 	ID            string                  `json:"id"`
@@ -441,12 +443,12 @@ func (h *Handlers) ImportGrok(w http.ResponseWriter, r *http.Request) {
 	var imported []auth.ImportedCredential
 	var err error
 	if strings.HasPrefix(strings.ToLower(strings.TrimSpace(r.Header.Get("Content-Type"))), "multipart/form-data") {
-		name, raw, uploadErr := readMultipartCredentialFile(w, r, h.maxImportBody())
+		files, uploadErr := readMultipartCredentialFiles(w, r, h.maxImportBody())
 		if uploadErr != nil {
 			writeErr(w, http.StatusBadRequest, uploadErr.Error())
 			return
 		}
-		imported, err = auth.ParseCredentialBundle(name, raw, h.maxImportBody())
+		imported, err = auth.ParseCredentialBundles(files, h.maxImportBody())
 		if err != nil {
 			writeErr(w, http.StatusBadRequest, err.Error())
 			return
@@ -487,53 +489,70 @@ func (h *Handlers) ImportGrok(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, outcome.httpStatus(), outcome)
 }
 
-func readMultipartCredentialFile(w http.ResponseWriter, r *http.Request, max int64) (string, []byte, error) {
+func readMultipartCredentialFiles(w http.ResponseWriter, r *http.Request, max int64) ([]auth.CredentialBundleFile, error) {
 	if r == nil || r.Body == nil {
-		return "", nil, fmt.Errorf("missing body")
+		return nil, fmt.Errorf("missing body")
 	}
 	if max <= 0 {
-		return "", nil, fmt.Errorf("invalid upload limit")
+		return nil, fmt.Errorf("invalid upload limit")
 	}
-	r.Body = http.MaxBytesReader(w, r.Body, max+(1<<20))
+	// Allow bounded multipart headers for very large file selections while the
+	// actual file payload remains capped by max below.
+	r.Body = http.MaxBytesReader(w, r.Body, max+(16<<20))
 	reader, err := r.MultipartReader()
 	if err != nil {
-		return "", nil, fmt.Errorf("invalid multipart upload: %w", err)
+		return nil, fmt.Errorf("invalid multipart upload: %w", err)
 	}
+	files := make([]auth.CredentialBundleFile, 0, 4)
+	var total int64
 	for {
 		part, nextErr := reader.NextPart()
 		if nextErr == io.EOF {
 			break
 		}
 		if nextErr != nil {
-			return "", nil, fmt.Errorf("invalid multipart upload: %w", nextErr)
+			return nil, fmt.Errorf("invalid multipart upload: %w", nextErr)
 		}
 		if part.FormName() != "file" {
 			_ = part.Close()
 			continue
 		}
+		if len(files) >= maxCredentialUploadFiles {
+			_ = part.Close()
+			return nil, fmt.Errorf("too many uploaded files (maximum %d)", maxCredentialUploadFiles)
+		}
 		name := strings.TrimSpace(part.FileName())
 		lowerName := strings.ToLower(name)
 		if name == "" || (!strings.HasSuffix(lowerName, ".json") && !strings.HasSuffix(lowerName, ".zip")) {
 			_ = part.Close()
-			return "", nil, fmt.Errorf("uploaded file must be a .json or .zip file")
+			return nil, fmt.Errorf("uploaded files must be .json or .zip")
 		}
-		raw, readErr := io.ReadAll(io.LimitReader(part, max+1))
+		remaining := max - total
+		if remaining <= 0 {
+			_ = part.Close()
+			return nil, fmt.Errorf("uploaded files are too large")
+		}
+		raw, readErr := io.ReadAll(io.LimitReader(part, remaining+1))
 		_ = part.Close()
 		if readErr != nil {
-			return "", nil, fmt.Errorf("read uploaded file: %w", readErr)
+			return nil, fmt.Errorf("read uploaded file: %w", readErr)
 		}
-		if int64(len(raw)) > max {
-			return "", nil, fmt.Errorf("uploaded file too large")
+		if int64(len(raw)) > remaining {
+			return nil, fmt.Errorf("uploaded files are too large")
 		}
 		if len(raw) == 0 {
-			return "", nil, fmt.Errorf("uploaded file is empty")
+			return nil, fmt.Errorf("uploaded file %q is empty", name)
 		}
 		if strings.HasSuffix(lowerName, ".json") && !json.Valid(raw) {
-			return "", nil, fmt.Errorf("uploaded file contains invalid json")
+			return nil, fmt.Errorf("uploaded file %q contains invalid json", name)
 		}
-		return name, raw, nil
+		total += int64(len(raw))
+		files = append(files, auth.CredentialBundleFile{Name: name, Data: raw})
 	}
-	return "", nil, fmt.Errorf("multipart upload is missing file field")
+	if len(files) == 0 {
+		return nil, fmt.Errorf("multipart upload is missing file fields")
+	}
+	return files, nil
 }
 
 // DisableCredential POST /admin/credentials/{id}/disable

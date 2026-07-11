@@ -146,11 +146,13 @@
     });
   }
 
-  function uploadJSONFile(path, file) {
+  function uploadCredentialFiles(path, files) {
     var headers = { Accept: "application/json" };
     if (state.key) headers.Authorization = "Bearer " + state.key;
     var form = new FormData();
-    form.append("file", file, file.name);
+    files.forEach(function (file) {
+      form.append("file", file, file.name);
+    });
     return fetch(API_BASE + path, {
       method: "POST",
       headers: headers,
@@ -1044,16 +1046,25 @@
     openModal("导入凭证 JSON", body, [cancel, ok]);
   }
 
-  function importGrokFile(file) {
-    if (!file) return;
-    if (!/\.(json|zip)$/i.test(file.name || "")) {
-      toast("请选择 JSON 或 ZIP 文件", "err");
+  function importGrokFiles(fileList) {
+    var files = Array.prototype.slice.call(fileList || []);
+    if (!files.length) return;
+    if (files.length > 10000) {
+      toast("一次最多选择 10,000 个文件", "err");
+      return;
+    }
+    var invalid = files.filter(function (file) {
+      return !/\.(json|zip)$/i.test(file.name || "");
+    });
+    if (invalid.length) {
+      toast("只能选择 JSON 或 ZIP 文件", "err");
       return;
     }
     var button = $("btn-import-file");
     if (button) button.disabled = true;
-    toast("正在导入 " + file.name + "…", "");
-    uploadJSONFile("/admin/credentials/import-grok?async=true", file)
+    var selectionLabel = files.length === 1 ? files[0].name : files.length + " 个文件";
+    toast("正在解析并合并 " + selectionLabel + "…", "");
+    uploadCredentialFiles("/admin/credentials/import-grok?async=true", files)
       .then(function (data) {
         if (!data || !data.job || !data.job.id) throw new Error("导入任务创建失败");
         toast("导入任务已创建，共 " + data.job.total + " 条", "");
@@ -1563,7 +1574,7 @@
         impFileInput.click();
       });
       impFileInput.addEventListener("change", function () {
-        importGrokFile(impFileInput.files && impFileInput.files[0]);
+        importGrokFiles(impFileInput.files);
       });
     }
 

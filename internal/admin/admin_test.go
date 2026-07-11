@@ -391,6 +391,51 @@ func TestImportGrokMultipartCPAAndSub2APIZIP(t *testing.T) {
 	}
 }
 
+func TestImportGrokMultipartMultipleFilesDeduplicatesAcrossSelection(t *testing.T) {
+	store, err := storage.New(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	h := &Handlers{Store: store, MaxBody: 1 << 20}
+
+	files := map[string]string{
+		"01-old.json":   `{"type":"xai","access_token":"old-access","refresh_token":"old-refresh","sub":"same-user","expired":"2026-07-12T10:00:00Z"}`,
+		"02-new.json":   `{"type":"xai","access_token":"new-access","refresh_token":"new-refresh","sub":"same-user","expired":"2026-07-12T12:00:00Z"}`,
+		"03-other.json": `{"type":"xai","access_token":"other-access","refresh_token":"other-refresh","sub":"other-user","expired":"2026-07-12T12:00:00Z"}`,
+	}
+	var body bytes.Buffer
+	writer := multipart.NewWriter(&body)
+	for name, content := range files {
+		part, createErr := writer.CreateFormFile("file", name)
+		if createErr != nil {
+			t.Fatal(createErr)
+		}
+		if _, writeErr := part.Write([]byte(content)); writeErr != nil {
+			t.Fatal(writeErr)
+		}
+	}
+	if err := writer.Close(); err != nil {
+		t.Fatal(err)
+	}
+	req := httptest.NewRequest(http.MethodPost, "/admin/credentials/import-grok", &body)
+	req.Header.Set("Content-Type", writer.FormDataContentType())
+	rr := httptest.NewRecorder()
+	h.ImportGrok(rr, req)
+	if rr.Code != http.StatusCreated || !strings.Contains(rr.Body.String(), `"created":2`) {
+		t.Fatalf("status=%d body=%s", rr.Code, rr.Body.String())
+	}
+	credentials, err := store.ListCredentials()
+	if err != nil || len(credentials) != 2 {
+		t.Fatalf("credentials=%d err=%v", len(credentials), err)
+	}
+	for _, credential := range credentials {
+		if credential.UserID == "same-user" && credential.AccessToken != "new-access" {
+			t.Fatalf("older rotation won: %+v", credential)
+		}
+	}
+}
+
 func TestImportGrokConsecutiveArrayBatchesDoNotOverwritePositions(t *testing.T) {
 	store, err := storage.New(t.TempDir())
 	if err != nil {

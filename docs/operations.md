@@ -33,6 +33,10 @@ multiple JSON files or nested ZIP batches; archives are parsed in memory and are
 never extracted to the data directory. macOS metadata and unrelated text/CSV
 files are ignored.
 
+The file picker accepts up to 10,000 JSON/ZIP files in one selection. They are
+parsed under one shared size/file-count budget, deduplicated across file
+boundaries, and committed as one asynchronous import job.
+
 ZIP nesting is limited to three levels, supported-file count to 20,000, and
 total uncompressed JSON to `limits.max_import_bytes`. Invalid, encrypted, or
 oversized archives fail before credentials are written. During normalization,
