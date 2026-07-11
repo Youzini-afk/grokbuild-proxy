@@ -43,6 +43,10 @@ type credentialBulkUpserter interface {
 	BulkUpsertCredentials([]storage.CreateCredentialInput) ([]storage.BulkUpsertResult, error)
 }
 
+type credentialExporter interface {
+	ExportCredentialsJSON() ([]byte, error)
+}
+
 // TokenService refreshes credentials and fetches billing.
 type TokenService interface {
 	ForceRefreshToken(ctx context.Context, credID string) (auth.TokenSet, storage.Credential, error)
@@ -257,6 +261,26 @@ func (h *Handlers) CreateCredential(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusCreated, maskCredential(created))
+}
+
+// ExportCredentials GET /admin/credentials/export returns a portable secret
+// snapshot. The admin bearer key is required by the enclosing router.
+func (h *Handlers) ExportCredentials(w http.ResponseWriter, r *http.Request) {
+	exporter, ok := h.Store.(credentialExporter)
+	if !ok {
+		writeErr(w, http.StatusNotImplemented, "credential export unavailable")
+		return
+	}
+	raw, err := exporter.ExportCredentialsJSON()
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Content-Disposition", `attachment; filename="grokbuild-credentials.json"`)
+	w.Header().Set("Cache-Control", "no-store")
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write(raw)
 }
 
 // ImportGrok POST /admin/credentials/import-grok

@@ -1,7 +1,9 @@
-// Package storage provides file-backed credential and client-key persistence.
+// Package storage provides SQLite-backed credential and client-key persistence
+// with automatic migration from the legacy JSON store.
 package storage
 
 import (
+	"database/sql"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -20,9 +22,10 @@ const (
 	backupGenerations = 5
 )
 
-// Store is a mutex + flock protected JSON file store under DataDir.
+// Store is a mutex + lifetime-lock protected SQLite store under DataDir.
 type Store struct {
 	dir string
+	db  *sql.DB
 
 	mu   sync.Mutex
 	lock *os.File
@@ -69,7 +72,13 @@ func New(dir string) (*Store, error) {
 		}
 		return nil, fmt.Errorf("storage: lock data dir: %w", err)
 	}
-	return &Store{dir: abs, lock: instanceLock}, nil
+	store := &Store{dir: abs, lock: instanceLock}
+	if err := store.openSQLite(); err != nil {
+		_ = unlockFile(instanceLock)
+		_ = instanceLock.Close()
+		return nil, err
+	}
+	return store, nil
 }
 
 func validateDataDir(abs string) error {
@@ -116,9 +125,17 @@ func (s *Store) Close() error {
 	if s.lock == nil {
 		return nil
 	}
+	var dbErr error
+	if s.db != nil {
+		dbErr = s.db.Close()
+		s.db = nil
+	}
 	_ = unlockFile(s.lock)
 	err := s.lock.Close()
 	s.lock = nil
+	if dbErr != nil {
+		return dbErr
+	}
 	return err
 }
 

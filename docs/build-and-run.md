@@ -63,8 +63,9 @@ Review at least:
 - `anthropic.model_aliases`
 - `limits.request_timeout_sec`
 
-Leave `api_key` and `admin_key` empty to generate local bootstrap keys on first
-start. They are written to `data/meta.json`.
+Managed deployments should set `API_KEY` and `ADMIN_KEY`. Empty values generate
+local bootstrap keys in `data/grokbuild.db`. Stop the service and run with
+`-print-keys` only when those generated keys must be recovered.
 
 ## Run from source
 
@@ -187,10 +188,11 @@ docker compose ps
 docker compose logs -f grokbuild-proxy
 ```
 
-Read generated bootstrap keys:
+Set bootstrap keys in `.env` before starting Compose:
 
 ```bash
-docker compose exec grokbuild-proxy sh -c 'cat /app/data/meta.json'
+API_KEY=sk-your-client-key
+ADMIN_KEY=sk-your-admin-key
 ```
 
 Stop:
@@ -210,7 +212,7 @@ docker compose down -v
 
 1. Start the proxy.
 2. Open `http://127.0.0.1:8080/admin`.
-3. Read `admin_key` from `data/meta.json`.
+3. Use the configured `ADMIN_KEY` to sign in.
 4. Complete browser device login or import an existing Grok CLI credential.
 5. Create or retrieve a client API key.
 6. Verify `/readyz`.
@@ -225,7 +227,7 @@ lifecycle.
 
 ```bash
 export ANTHROPIC_BASE_URL=http://127.0.0.1:8080
-export ANTHROPIC_AUTH_TOKEN="$(jq -r .api_key data/meta.json)"
+export ANTHROPIC_AUTH_TOKEN="${API_KEY}"
 export ANTHROPIC_MODEL=grok-4.5
 
 claude --effort high
@@ -235,7 +237,7 @@ claude --effort high
 
 ```bash
 export OPENAI_BASE_URL=http://127.0.0.1:8080/v1
-export OPENAI_API_KEY="$(jq -r .api_key data/meta.json)"
+export OPENAI_API_KEY="${API_KEY}"
 ```
 
 ## Validation

@@ -35,7 +35,7 @@ type Credential struct {
 	UpdatedAt     time.Time      `json:"updated_at"`
 }
 
-// credentialsDoc is the on-disk envelope for credentials.json.
+// credentialsDoc is the legacy JSON envelope used during automatic migration.
 type credentialsDoc struct {
 	Credentials []Credential `json:"credentials"`
 }
@@ -50,6 +50,9 @@ type BulkUpsertResult struct {
 
 // ListCredentials returns all credentials sorted by priority desc, then id.
 func (s *Store) ListCredentials() ([]Credential, error) {
+	if s.db != nil {
+		return s.dbListCredentials()
+	}
 	var out []Credential
 	err := s.withLock(func() error {
 		doc, err := s.loadCredentials()
@@ -73,6 +76,9 @@ func (s *Store) ListCredentials() ([]Credential, error) {
 
 // GetCredential returns a credential by id.
 func (s *Store) GetCredential(id string) (Credential, error) {
+	if s.db != nil {
+		return s.dbGetCredential(id)
+	}
 	var found Credential
 	err := s.withLock(func() error {
 		doc, err := s.loadCredentials()
@@ -107,6 +113,9 @@ type CreateCredentialInput struct {
 
 // CreateCredential appends a new credential and returns the stored record.
 func (s *Store) CreateCredential(in CreateCredentialInput) (Credential, error) {
+	if s.db != nil {
+		return s.dbCreateCredential(in)
+	}
 	if in.AccessToken == "" && in.RefreshToken == "" {
 		return Credential{}, fmt.Errorf("storage: access_token or refresh_token required")
 	}
@@ -155,6 +164,16 @@ func (s *Store) CreateCredential(in CreateCredentialInput) (Credential, error) {
 // identity. Runtime health, enabled state, priority and creation time survive
 // token rotation.
 func (s *Store) UpsertCredential(in CreateCredentialInput) (Credential, bool, error) {
+	if s.db != nil {
+		results, err := s.dbBulkUpsertCredentials([]CreateCredentialInput{in})
+		if err != nil {
+			return Credential{}, false, err
+		}
+		if len(results) != 1 {
+			return Credential{}, false, fmt.Errorf("storage: missing upsert result")
+		}
+		return results[0].Credential, results[0].Created, results[0].Err
+	}
 	if in.AccessToken == "" && in.RefreshToken == "" {
 		return Credential{}, false, fmt.Errorf("storage: access_token or refresh_token required")
 	}
@@ -243,6 +262,9 @@ func (s *Store) UpsertCredential(in CreateCredentialInput) (Credential, bool, er
 // records are reported individually; valid records are committed together with
 // a single atomic file replacement. This avoids O(N) full-file rewrites.
 func (s *Store) BulkUpsertCredentials(inputs []CreateCredentialInput) ([]BulkUpsertResult, error) {
+	if s.db != nil {
+		return s.dbBulkUpsertCredentials(inputs)
+	}
 	results := make([]BulkUpsertResult, len(inputs))
 	if len(inputs) == 0 {
 		return results, nil
@@ -411,6 +433,9 @@ func sameCredentialIdentity(c Credential, in CreateCredentialInput) bool {
 // The full Credential is expected (callers typically Get then mutate).
 // Prefer PatchCredential for concurrent field updates to avoid lost-refresh races.
 func (s *Store) UpdateCredential(c Credential) (Credential, error) {
+	if s.db != nil {
+		return s.dbUpdateCredential(c)
+	}
 	if c.ID == "" {
 		return Credential{}, fmt.Errorf("storage: credential id required")
 	}
@@ -445,6 +470,9 @@ func (s *Store) UpdateCredential(c Credential) (Credential, error) {
 // PatchCredential loads a credential, applies mutate under the store lock, then saves.
 // Use this for concurrent field updates (token rotate, last_used, enable, priority).
 func (s *Store) PatchCredential(id string, mutate func(*Credential) error) (Credential, error) {
+	if s.db != nil {
+		return s.dbPatchCredential(id, mutate)
+	}
 	if id == "" {
 		return Credential{}, fmt.Errorf("storage: credential id required")
 	}
@@ -486,6 +514,9 @@ func (s *Store) PatchCredential(id string, mutate func(*Credential) error) (Cred
 
 // DeleteCredential removes a credential by id.
 func (s *Store) DeleteCredential(id string) error {
+	if s.db != nil {
+		return s.dbDeleteCredential(id)
+	}
 	return s.withLock(func() error {
 		doc, err := s.loadCredentials()
 		if err != nil {

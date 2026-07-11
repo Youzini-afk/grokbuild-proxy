@@ -189,6 +189,15 @@ func applyListenEnvironment(cfg *Config) {
 	if value := strings.TrimSpace(os.Getenv("LISTEN")); value != "" {
 		cfg.Listen = value
 	}
+	if value := strings.TrimSpace(os.Getenv("DATA_DIR")); value != "" {
+		cfg.DataDir = value
+	}
+	if value := strings.TrimSpace(os.Getenv("API_KEY")); value != "" {
+		cfg.APIKey = value
+	}
+	if value := strings.TrimSpace(os.Getenv("ADMIN_KEY")); value != "" {
+		cfg.AdminKey = value
+	}
 	switch strings.ToLower(strings.TrimSpace(os.Getenv("ALLOW_PUBLIC_LISTEN"))) {
 	case "1", "true", "yes", "on":
 		cfg.AllowPublicListen = true

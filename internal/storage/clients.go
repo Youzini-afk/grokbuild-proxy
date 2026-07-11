@@ -22,7 +22,7 @@ type ClientKey struct {
 	Stats     map[string]any `json:"stats,omitempty"`
 }
 
-// clientsDoc is the on-disk envelope for clients.json.
+// clientsDoc is the legacy JSON envelope used during automatic migration.
 type clientsDoc struct {
 	Clients []ClientKey `json:"clients"`
 }
@@ -176,8 +176,8 @@ func (s *Store) LookupClientByPlaintext(plaintext string) (ClientKey, bool, erro
 	return found, ok, err
 }
 
-// bootstrapMeta holds process-local plaintext bootstrap secrets (mode 0600).
-// Client keys are still stored hashed in clients.json; admin is never a client.
+// bootstrapMeta holds process-local plaintext bootstrap secrets in the protected
+// SQLite database. Client keys remain hashed; admin is never a client.
 type bootstrapMeta struct {
 	APIKey   string `json:"api_key,omitempty"`
 	AdminKey string `json:"admin_key,omitempty"`
@@ -305,6 +305,9 @@ func (s *Store) EnsureBootstrapKeys(configuredAPIKey, configuredAdminKey string)
 }
 
 func (s *Store) loadMeta() (bootstrapMeta, error) {
+	if s.db != nil {
+		return s.dbLoadMeta()
+	}
 	var meta bootstrapMeta
 	err := readJSONFile(s.metaPath(), &meta)
 	if err != nil {
@@ -317,6 +320,9 @@ func (s *Store) loadMeta() (bootstrapMeta, error) {
 }
 
 func (s *Store) saveMeta(meta bootstrapMeta) error {
+	if s.db != nil {
+		return s.dbSaveMeta(meta)
+	}
 	return writeJSONFile(s.metaPath(), meta)
 }
 
@@ -347,6 +353,9 @@ func keyPrefix(plaintext string) string {
 }
 
 func (s *Store) loadClients() (clientsDoc, error) {
+	if s.db != nil {
+		return s.dbLoadClients()
+	}
 	var doc clientsDoc
 	err := readJSONFile(s.clientsPath(), &doc)
 	if err != nil {
@@ -362,6 +371,9 @@ func (s *Store) loadClients() (clientsDoc, error) {
 }
 
 func (s *Store) saveClients(doc clientsDoc) error {
+	if s.db != nil {
+		return s.dbSaveClients(doc)
+	}
 	if doc.Clients == nil {
 		doc.Clients = []ClientKey{}
 	}

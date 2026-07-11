@@ -22,6 +22,7 @@ func (h *Handlers) Register(mux *http.ServeMux) {
 
 	// Credentials collection
 	mux.HandleFunc("GET /admin/credentials", h.ListCredentials)
+	mux.HandleFunc("GET /admin/credentials/export", h.ExportCredentials)
 	mux.HandleFunc("POST /admin/credentials", h.CreateCredential)
 	mux.HandleFunc("POST /admin/credentials/import-grok", h.ImportGrok)
 	mux.HandleFunc("POST /admin/oauth/device/start", h.StartDeviceLogin)
@@ -69,6 +70,8 @@ func (h *Handlers) dispatchFallback(w http.ResponseWriter, r *http.Request) {
 	switch {
 	case path == "/admin/credentials" && r.Method == http.MethodGet:
 		h.ListCredentials(w, r)
+	case path == "/admin/credentials/export" && r.Method == http.MethodGet:
+		h.ExportCredentials(w, r)
 	case path == "/admin/credentials" && r.Method == http.MethodPost:
 		h.CreateCredential(w, r)
 	case path == "/admin/credentials/import-grok" && r.Method == http.MethodPost:

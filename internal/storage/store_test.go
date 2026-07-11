@@ -235,29 +235,21 @@ func TestClientKeyCRUDAndHashOnly(t *testing.T) {
 		// prefix is short head only
 	}
 
-	// On-disk file must not contain plaintext secret.
-	raw, err := os.ReadFile(filepath.Join(s.DataDir(), clientsFile))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if strings.Contains(string(raw), res.Plaintext) {
-		t.Fatal("plaintext client key must not be persisted")
-	}
-	var doc clientsDoc
-	if err := json.Unmarshal(raw, &doc); err != nil {
-		t.Fatal(err)
-	}
-	if len(doc.Clients) != 1 || doc.Clients[0].KeyHash == "" {
-		t.Fatalf("disk doc: %+v", doc)
+	// SQLite stores only the hash, never the generated plaintext client key.
+	for _, suffix := range []string{"", "-wal", "-shm"} {
+		raw, readErr := os.ReadFile(filepath.Join(s.DataDir(), databaseFile) + suffix)
+		if readErr == nil && strings.Contains(string(raw), res.Plaintext) {
+			t.Fatal("plaintext client key must not be persisted")
+		}
 	}
 
 	// File mode 0600.
-	info, err := os.Stat(filepath.Join(s.DataDir(), clientsFile))
+	info, err := os.Stat(filepath.Join(s.DataDir(), databaseFile))
 	if err != nil {
 		t.Fatal(err)
 	}
 	if runtime.GOOS != "windows" && info.Mode().Perm() != 0o600 {
-		t.Fatalf("clients.json mode: %o", info.Mode().Perm())
+		t.Fatalf("database mode: %o", info.Mode().Perm())
 	}
 
 	found, ok, err := s.LookupClientByPlaintext(res.Plaintext)
@@ -323,13 +315,13 @@ func TestEnsureBootstrapKeysGenerate(t *testing.T) {
 		t.Fatalf("admin should not be client key: ok=%v err=%v", ok, err)
 	}
 
-	// meta.json persists bootstrap secrets (0600).
-	info, err := os.Stat(filepath.Join(s.DataDir(), metaFile))
+	// SQLite persists bootstrap secrets in the protected database.
+	info, err := os.Stat(filepath.Join(s.DataDir(), databaseFile))
 	if err != nil {
-		t.Fatalf("meta.json missing: %v", err)
+		t.Fatalf("database missing: %v", err)
 	}
 	if runtime.GOOS != "windows" && info.Mode().Perm() != 0o600 {
-		t.Fatalf("meta.json mode: %o", info.Mode().Perm())
+		t.Fatalf("database mode: %o", info.Mode().Perm())
 	}
 
 	// Second call with empty config reuses meta.json (no new client mint).
@@ -492,7 +484,7 @@ func TestEnsureBootstrapKeysConfigured(t *testing.T) {
 		t.Fatalf("configured api not stored: ok=%v err=%v", ok, err)
 	}
 
-	// credentials.json mode when written.
+	// Database mode remains protected when credentials are written.
 	_, err = s.CreateCredential(CreateCredentialInput{
 		Name:         "n",
 		AccessToken:  "at",
@@ -501,12 +493,12 @@ func TestEnsureBootstrapKeysConfigured(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	info, err := os.Stat(filepath.Join(s.DataDir(), credentialsFile))
+	info, err := os.Stat(filepath.Join(s.DataDir(), databaseFile))
 	if err != nil {
 		t.Fatal(err)
 	}
 	if runtime.GOOS != "windows" && info.Mode().Perm() != 0o600 {
-		t.Fatalf("credentials.json mode: %o", info.Mode().Perm())
+		t.Fatalf("database mode: %o", info.Mode().Perm())
 	}
 }
 
@@ -606,6 +598,63 @@ func TestCorruptCredentialFileRecoversFromBackup(t *testing.T) {
 	}
 	if creds, err := s.ListCredentials(); err != nil || len(creds) != 1 {
 		t.Fatalf("valid backup was overwritten: credentials=%+v err=%v", creds, err)
+	}
+}
+
+func TestJSONMigrationPrefersLargestValidSnapshotAndRunsOnce(t *testing.T) {
+	dir := t.TempDir()
+	legacy := credentialsDoc{Credentials: make([]Credential, 0, 120)}
+	for i := 0; i < 120; i++ {
+		legacy.Credentials = append(legacy.Credentials, Credential{
+			ID: fmt.Sprintf("legacy-%03d", i), Name: fmt.Sprintf("legacy-%03d", i),
+			UserID: fmt.Sprintf("user-%03d", i), AccessToken: fmt.Sprintf("access-%03d", i),
+			RefreshToken: fmt.Sprintf("refresh-%03d", i), Enabled: true, Priority: 100,
+			CreatedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC(),
+		})
+	}
+	writeDoc := func(path string, value any) {
+		raw, err := json.Marshal(value)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, raw, 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	writeDoc(filepath.Join(dir, credentialsFile), credentialsDoc{Credentials: legacy.Credentials[:2]})
+	writeDoc(filepath.Join(dir, credentialsFile)+".bak", legacy)
+	writeDoc(filepath.Join(dir, clientsFile), clientsDoc{Clients: []ClientKey{{
+		ID: "legacy-client", Name: "legacy", KeyHash: HashKey("sk-legacy-api"),
+		Prefix: "sk-legac", CreatedAt: time.Now().UTC(),
+	}}})
+	writeDoc(filepath.Join(dir, metaFile), bootstrapMeta{APIKey: "sk-legacy-api", AdminKey: "sk-legacy-admin"})
+
+	s, err := New(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	credentials, err := s.ListCredentials()
+	if err != nil || len(credentials) != 120 {
+		t.Fatalf("migrated credentials=%d err=%v", len(credentials), err)
+	}
+	apiKey, adminKey, _, _, err := s.EnsureBootstrapKeys("", "")
+	if err != nil || apiKey != "sk-legacy-api" || adminKey != "sk-legacy-admin" {
+		t.Fatalf("migrated keys api=%q admin=%q err=%v", apiKey, adminKey, err)
+	}
+	if err := s.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	// The migration marker prevents stale JSON from being re-imported.
+	writeDoc(filepath.Join(dir, credentialsFile)+".bak", credentialsDoc{Credentials: legacy.Credentials[:1]})
+	s, err = New(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	credentials, err = s.ListCredentials()
+	if err != nil || len(credentials) != 120 {
+		t.Fatalf("reopened credentials=%d err=%v", len(credentials), err)
 	}
 }
 

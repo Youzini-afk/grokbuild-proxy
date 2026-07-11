@@ -204,12 +204,18 @@ func TestLoadAppliesListenEnvironmentBeforeValidation(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Setenv("LISTEN", "127.0.0.1:19090")
+	t.Setenv("DATA_DIR", "/tmp/grokbuild-data")
+	t.Setenv("API_KEY", "sk-env-api")
+	t.Setenv("ADMIN_KEY", "sk-env-admin")
 	cfg, err := Load(path)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if cfg.Listen != "127.0.0.1:19090" {
 		t.Fatalf("listen=%q", cfg.Listen)
+	}
+	if cfg.DataDir != "/tmp/grokbuild-data" || cfg.APIKey != "sk-env-api" || cfg.AdminKey != "sk-env-admin" {
+		t.Fatalf("environment overrides not applied: %+v", cfg)
 	}
 }
 

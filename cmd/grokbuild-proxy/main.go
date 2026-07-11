@@ -32,6 +32,7 @@ func main() {
 	slog.SetDefault(logger)
 	configPath := flag.String("config", "", "path to config.yaml (defaults to config.yaml/config.example.yaml when present)")
 	showVersion := flag.Bool("version", false, "print version and exit")
+	printKeys := flag.Bool("print-keys", false, "print resolved API/admin keys and exit (handle output as secret)")
 	flag.Parse()
 	if *showVersion {
 		fmt.Println(version)
@@ -69,16 +70,20 @@ func main() {
 		fail(logger, "bootstrap_keys_failed", err)
 	}
 	if genAPI || genAdmin {
-		logger.Info("bootstrap_keys_generated", "path", cfg.DataDir+"/meta.json")
+		logger.Info("bootstrap_keys_generated", "path", cfg.DataDir+"/"+"grokbuild.db", "hint", "set API_KEY and ADMIN_KEY environment variables for managed deployments")
 	}
 	if !genAPI && !genAdmin && (strings.TrimSpace(cfg.APIKey) == "" || strings.TrimSpace(cfg.AdminKey) == "") {
-		logger.Info("bootstrap_keys_loaded", "path", cfg.DataDir+"/meta.json")
+		logger.Info("bootstrap_keys_loaded", "path", cfg.DataDir+"/"+"grokbuild.db")
 	}
 	if apiKey != "" && adminKey != "" && apiKey == adminKey {
 		fail(logger, "bootstrap_keys_invalid", fmt.Errorf("api_key and admin_key must differ"))
 	}
 	cfg.APIKey = apiKey
 	cfg.AdminKey = adminKey
+	if *printKeys {
+		fmt.Printf("API_KEY=%s\nADMIN_KEY=%s\n", apiKey, adminKey)
+		return
+	}
 
 	oauth := &auth.OAuthClient{
 		HTTPClient: &http.Client{Timeout: cfg.RequestTimeout()},

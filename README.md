@@ -38,7 +38,7 @@ OpenAI 兼容客户端。
 - 工具轮次间的加密 Reasoning 回放
 - 多账号选择、会话粘滞、冷却和故障切换
 - Grok CLI 凭据导入和浏览器 OAuth Device Login
-- 带文件锁、原子写入和备份恢复的本地 JSON 存储
+- SQLite WAL 事务存储，支持旧 JSON 自动迁移和大规模账号池
 - 内嵌 Admin Web UI
 - 健康检查、Readiness、Prometheus 指标、Request ID 和结构化日志
 - 多平台归档、校验和、SBOM 与 GHCR 容器镜像
@@ -97,12 +97,13 @@ go run ./cmd/grokbuild-proxy
 
 默认监听 `127.0.0.1:8080`。
 
-`api_key` 和 `admin_key` 留空时，首次启动会将随机密钥写入
-`data/meta.json`。该文件包含敏感信息，禁止提交或分享。
+托管部署建议显式设置 `API_KEY` 和 `ADMIN_KEY` 环境变量。留空时首次
+启动仍会生成随机密钥并保存在 `data/grokbuild.db`；需要读取时先停止
+服务，再使用 `-print-keys`，其输出属于敏感信息。
 
 ```bash
-jq -r .api_key data/meta.json
-jq -r .admin_key data/meta.json
+API_KEY=sk-your-client-key ADMIN_KEY=sk-your-admin-key \
+  go run ./cmd/grokbuild-proxy
 ```
 
 打开 Admin UI：
@@ -121,7 +122,7 @@ http://127.0.0.1:8080/admin
 
 ```bash
 export ANTHROPIC_BASE_URL=http://127.0.0.1:8080
-export ANTHROPIC_AUTH_TOKEN="$(jq -r .api_key data/meta.json)"
+export ANTHROPIC_AUTH_TOKEN="${API_KEY}"
 export ANTHROPIC_MODEL=grok-4.5
 
 claude --effort high
@@ -139,7 +140,7 @@ export ANTHROPIC_MODEL=claude-sonnet-5
 
 ```bash
 export OPENAI_BASE_URL=http://127.0.0.1:8080/v1
-export OPENAI_API_KEY="$(jq -r .api_key data/meta.json)"
+export OPENAI_API_KEY="${API_KEY}"
 ```
 
 ```bash
@@ -159,8 +160,9 @@ curl --fail --silent --show-error \
 ```bash
 cp config.example.yaml config.yaml
 docker compose up --build -d
-docker compose exec grokbuild-proxy sh -c 'cat /app/data/meta.json'
 ```
+
+启动前在 `.env` 中设置 `API_KEY` 和 `ADMIN_KEY`。
 
 Compose 只在宿主机发布 `127.0.0.1:8080`，运行状态保存在命名卷中。
 

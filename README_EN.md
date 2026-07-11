@@ -34,7 +34,7 @@ thinking blocks, encrypted reasoning replay, and Grok-hosted web search.
 - Summarized/omitted thinking and encrypted reasoning replay
 - Multi-account selection, sticky sessions, cooldown, and failover
 - Grok CLI import and browser OAuth device login
-- Atomic local JSON storage with locking and backup recovery
+- Transactional SQLite WAL storage with automatic legacy JSON migration
 - Embedded Admin Web UI
 - Health, readiness, Prometheus metrics, request IDs, and structured logs
 - Multi-platform archives, checksums, SBOMs, and GHCR images
@@ -70,12 +70,13 @@ cp config.example.yaml config.yaml
 go run ./cmd/grokbuild-proxy
 ```
 
-The proxy listens on `127.0.0.1:8080`. Empty bootstrap keys are generated in
-`data/meta.json`.
+The proxy listens on `127.0.0.1:8080`. Managed deployments should set
+`API_KEY` and `ADMIN_KEY`. Empty values are generated into `data/grokbuild.db`;
+stop the service and use `-print-keys` only when recovery is necessary.
 
 ```bash
-jq -r .api_key data/meta.json
-jq -r .admin_key data/meta.json
+API_KEY=sk-your-client-key ADMIN_KEY=sk-your-admin-key \
+  go run ./cmd/grokbuild-proxy
 ```
 
 Admin UI:
@@ -91,7 +92,7 @@ potentially stale `~/.grok/auth.json` refresh-token snapshot.
 
 ```bash
 export ANTHROPIC_BASE_URL=http://127.0.0.1:8080
-export ANTHROPIC_AUTH_TOKEN="$(jq -r .api_key data/meta.json)"
+export ANTHROPIC_AUTH_TOKEN="${API_KEY}"
 export ANTHROPIC_MODEL=grok-4.5
 
 claude --effort high
@@ -103,7 +104,7 @@ Configured Claude aliases can also be mapped to Grok models.
 
 ```bash
 export OPENAI_BASE_URL=http://127.0.0.1:8080/v1
-export OPENAI_API_KEY="$(jq -r .api_key data/meta.json)"
+export OPENAI_API_KEY="${API_KEY}"
 ```
 
 ```bash
@@ -119,8 +120,9 @@ curl --fail --silent --show-error \
 ```bash
 cp config.example.yaml config.yaml
 docker compose up --build -d
-docker compose exec grokbuild-proxy sh -c 'cat /app/data/meta.json'
 ```
+
+Set `API_KEY` and `ADMIN_KEY` in `.env` before starting Compose.
 
 Published image:
 

@@ -12,8 +12,8 @@ The service owns four responsibilities:
 3. Select and fail over between credentials safely.
 4. Expose local administration and operational signals.
 
-It intentionally uses the Go standard library and local JSON storage to remain
-easy to audit and operate.
+It uses a single Go binary and an embedded SQLite WAL database to remain easy
+to deploy while supporting large credential pools.
 
 ## Goals
 
@@ -169,18 +169,17 @@ scheduler.
 Runtime state is stored under `data_dir`:
 
 ```text
-credentials.json
-clients.json
-meta.json
+grokbuild.db
+grokbuild.db-wal
+grokbuild.db-shm
 ```
 
 Storage properties:
 
-- Process-lifetime file lock
-- Atomic temporary-file write and rename
-- Directory `fsync`
-- Validated JSON backup before replacement
-- Backup recovery for corrupt primary files
+- Process-lifetime data-directory lock
+- SQLite WAL transactions and indexed credential lookup
+- Automatic one-time migration from legacy JSON snapshots
+- Migration selects the largest valid primary/backup generation
 - `0600` secret files and `0700` newly created directories
 - Dangerous data-directory rejection
 - Atomic field patches to avoid stale full-record token overwrites
@@ -200,7 +199,7 @@ Threats and controls:
 | Token leakage | Local secret files, masking, no prompt/token logs |
 | Concurrent refresh rotation | Per-credential singleflight and atomic persistence |
 | Duplicate process corruption | Process-lifetime data-directory lock |
-| Partial/corrupt writes | Atomic writes, sync, backup validation and recovery |
+| Partial/corrupt writes | SQLite WAL transactions and integrity-checked migration |
 | Oversized requests | Configurable body and concurrency limits |
 | Malicious endpoint override | Strict HTTPS/xAI configuration validation |
 
@@ -224,7 +223,7 @@ Prompts, request bodies, OAuth tokens, and generated keys are not logged.
 |---|---|---|
 | Single Go binary | Simple deployment and auditability | Less modular than separate services |
 | Embedded Admin UI | No Node build/runtime dependency | UI remains intentionally small |
-| Local JSON storage | Suitable for single-operator use | Not appropriate for clustered writes |
+| Embedded SQLite WAL | Handles large single-instance pools without an external database | Multi-replica writes require PostgreSQL |
 | Responses as canonical upstream | Preserves current Grok capabilities | Requires protocol state machines |
 | Loopback-first | Protects credentials and quota by default | Containers require explicit internal bind |
 | Sticky credential sessions | Improves cache and encrypted-state continuity | Failover can lose account-bound reasoning state |

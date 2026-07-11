@@ -32,18 +32,19 @@ backing that volume up with your normal Docker volume backup tooling.
 
 Back up the entire directory, including:
 
-- `credentials.json`: OAuth tokens and persisted health;
-- `clients.json`: hashed client keys and revocation state;
-- `meta.json`: bootstrap key material;
-- `*.bak`: previous valid snapshots.
+- `grokbuild.db`: credentials, clients, bootstrap keys and runtime health;
+- `grokbuild.db-wal` / `grokbuild.db-shm` when present;
+- legacy `credentials.json`, `clients.json`, `meta.json` and `*.bak` files retained after migration.
 
 Files contain secrets and must remain mode `0600`; the dedicated directory
 should be accessible only to the service account. To restore, stop the process,
 replace the whole directory from one consistent backup, verify ownership and
 permissions, then start and check `/readyz`.
 
-If a primary JSON file is truncated or corrupt, the proxy reads its `.bak`
-snapshot. Investigate disk or filesystem health before continuing.
+On first start after upgrading, the proxy imports the largest valid legacy JSON
+snapshot into SQLite in one transaction and records a migration marker. Legacy
+files remain untouched for rollback. Use `-print-keys` only while the service is
+stopped when bootstrap keys must be recovered; its output contains secrets.
 
 ## Upgrade and rollback
 

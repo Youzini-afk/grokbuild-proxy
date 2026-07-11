@@ -347,6 +347,29 @@ func TestImportGrokMultipartRejectsOversizedFile(t *testing.T) {
 	}
 }
 
+func TestExportCredentialsProducesReimportableGrokJSON(t *testing.T) {
+	store, err := storage.New(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	if _, err := store.CreateCredential(storage.CreateCredentialInput{
+		Email: "export@example.com", UserID: "export-user", AccessToken: "export-access", RefreshToken: "export-refresh",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	h := &Handlers{Store: store}
+	rr := httptest.NewRecorder()
+	h.ExportCredentials(rr, httptest.NewRequest(http.MethodGet, "/admin/credentials/export", nil))
+	if rr.Code != http.StatusOK || !strings.Contains(rr.Header().Get("Content-Disposition"), "attachment") {
+		t.Fatalf("status=%d headers=%v body=%s", rr.Code, rr.Header(), rr.Body.String())
+	}
+	imported, err := auth.ParseGrokAuthJSON(rr.Body.Bytes())
+	if err != nil || len(imported) != 1 || imported[0].UserID != "export-user" {
+		t.Fatalf("imported=%+v err=%v", imported, err)
+	}
+}
+
 type fakeDeviceOAuth struct {
 	polls int
 }

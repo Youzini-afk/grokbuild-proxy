@@ -12,6 +12,9 @@ services:
     environment:
       LISTEN: "0.0.0.0:8080"
       ALLOW_PUBLIC_LISTEN: "true"
+      DATA_DIR: "/app/data"
+      API_KEY: "${API_KEY:-}"
+      ADMIN_KEY: "${ADMIN_KEY:-}"
     # Prefer binding only to loopback on the host (see ports above).
     # Do not expose this proxy to untrusted networks.
 
