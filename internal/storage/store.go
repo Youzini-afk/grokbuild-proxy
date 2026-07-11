@@ -12,11 +12,12 @@ import (
 )
 
 const (
-	credentialsFile = "credentials.json"
-	clientsFile     = "clients.json"
-	metaFile        = "meta.json"
-	fileMode        = 0o600
-	dirMode         = 0o700
+	credentialsFile   = "credentials.json"
+	clientsFile       = "clients.json"
+	metaFile          = "meta.json"
+	fileMode          = 0o600
+	dirMode           = 0o700
+	backupGenerations = 5
 )
 
 // Store is a mutex + flock protected JSON file store under DataDir.
@@ -190,6 +191,9 @@ func atomicWrite(path string, data []byte) error {
 	if previous, err := os.ReadFile(path); err == nil {
 		// Never replace a known-good backup with a corrupt/truncated primary.
 		if json.Valid(previous) {
+			if err := rotateBackups(path, backupGenerations); err != nil {
+				return fmt.Errorf("rotate backups: %w", err)
+			}
 			if err := writeBackup(path+".bak", previous); err != nil {
 				return fmt.Errorf("backup existing file: %w", err)
 			}
@@ -206,6 +210,29 @@ func atomicWrite(path string, data []byte) error {
 	if dirFile, err := os.Open(dir); err == nil {
 		_ = dirFile.Sync()
 		_ = dirFile.Close()
+	}
+	return nil
+}
+
+// rotateBackups retains path.bak plus numbered historical generations.
+// Renames stay on the same filesystem and avoid re-reading large snapshots.
+func rotateBackups(path string, generations int) error {
+	if generations <= 1 {
+		return nil
+	}
+	oldest := fmt.Sprintf("%s.bak.%d", path, generations-1)
+	if err := os.Remove(oldest); err != nil && !os.IsNotExist(err) {
+		return err
+	}
+	for i := generations - 2; i >= 1; i-- {
+		from := fmt.Sprintf("%s.bak.%d", path, i)
+		to := fmt.Sprintf("%s.bak.%d", path, i+1)
+		if err := os.Rename(from, to); err != nil && !os.IsNotExist(err) {
+			return err
+		}
+	}
+	if err := os.Rename(path+".bak", path+".bak.1"); err != nil && !os.IsNotExist(err) {
+		return err
 	}
 	return nil
 }

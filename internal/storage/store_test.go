@@ -2,8 +2,10 @@ package storage
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"testing"
@@ -176,6 +178,43 @@ func TestUpsertCredentialIsIdempotentAndPreservesHealth(t *testing.T) {
 	}
 }
 
+func TestBulkUpsertCredentialsSingleCommitAndIdempotent(t *testing.T) {
+	s := newTestStore(t)
+	inputs := make([]CreateCredentialInput, 0, 250)
+	for i := 0; i < 250; i++ {
+		inputs = append(inputs, CreateCredentialInput{
+			Name: fmt.Sprintf("account-%d", i), UserID: fmt.Sprintf("user-%d", i),
+			Email:       fmt.Sprintf("user-%d@example.com", i),
+			AccessToken: fmt.Sprintf("access-%d", i), RefreshToken: fmt.Sprintf("refresh-%d", i),
+		})
+	}
+	results, err := s.BulkUpsertCredentials(inputs)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i, result := range results {
+		if result.Err != nil || !result.Created {
+			t.Fatalf("result[%d]=%+v", i, result)
+		}
+	}
+	if _, err := os.Stat(s.credentialsPath() + ".bak.1"); !os.IsNotExist(err) {
+		t.Fatalf("one bulk commit must not create multiple backup generations: %v", err)
+	}
+	results, err = s.BulkUpsertCredentials(inputs)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i, result := range results {
+		if result.Err != nil || result.Created {
+			t.Fatalf("idempotent result[%d]=%+v", i, result)
+		}
+	}
+	creds, err := s.ListCredentials()
+	if err != nil || len(creds) != len(inputs) {
+		t.Fatalf("credentials=%d err=%v", len(creds), err)
+	}
+}
+
 func TestClientKeyCRUDAndHashOnly(t *testing.T) {
 	s := newTestStore(t)
 
@@ -217,7 +256,7 @@ func TestClientKeyCRUDAndHashOnly(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if info.Mode().Perm() != 0o600 {
+	if runtime.GOOS != "windows" && info.Mode().Perm() != 0o600 {
 		t.Fatalf("clients.json mode: %o", info.Mode().Perm())
 	}
 
@@ -289,7 +328,7 @@ func TestEnsureBootstrapKeysGenerate(t *testing.T) {
 	if err != nil {
 		t.Fatalf("meta.json missing: %v", err)
 	}
-	if info.Mode().Perm() != 0o600 {
+	if runtime.GOOS != "windows" && info.Mode().Perm() != 0o600 {
 		t.Fatalf("meta.json mode: %o", info.Mode().Perm())
 	}
 
@@ -466,7 +505,7 @@ func TestEnsureBootstrapKeysConfigured(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if info.Mode().Perm() != 0o600 {
+	if runtime.GOOS != "windows" && info.Mode().Perm() != 0o600 {
 		t.Fatalf("credentials.json mode: %o", info.Mode().Perm())
 	}
 }
@@ -478,11 +517,12 @@ func TestAtomicWriteAndDirMode(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	defer s.Close()
 	info, err := os.Stat(dataDir)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if info.Mode().Perm() != 0o700 {
+	if runtime.GOOS != "windows" && info.Mode().Perm() != 0o700 {
 		t.Fatalf("data dir mode: %o", info.Mode().Perm())
 	}
 	_ = s
@@ -493,14 +533,16 @@ func TestNewDoesNotChmodExistingDirectory(t *testing.T) {
 	if err := os.Mkdir(dir, 0o750); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := New(dir); err != nil {
+	s, err := New(dir)
+	if err != nil {
 		t.Fatal(err)
 	}
+	defer s.Close()
 	info, err := os.Stat(dir)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := info.Mode().Perm(); got != 0o750 {
+	if got := info.Mode().Perm(); runtime.GOOS != "windows" && got != 0o750 {
 		t.Fatalf("existing directory mode changed to %o", got)
 	}
 }

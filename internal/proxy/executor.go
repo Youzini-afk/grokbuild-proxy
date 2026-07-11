@@ -426,7 +426,7 @@ func (e *Executor) touchLastUsed(cred storage.Credential) error {
 	if cred.LastUsedAt != nil && cred.LastUsedAt.After(previous) {
 		previous = *cred.LastUsedAt
 	}
-	if !previous.IsZero() && (now.Before(previous) || now.Sub(previous) < 30*time.Second) {
+	if !previous.IsZero() && (now.Before(previous) || now.Sub(previous) < 5*time.Minute) {
 		e.usageMu.Unlock()
 		return nil
 	}

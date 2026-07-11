@@ -97,7 +97,7 @@ func TestTouchLastUsedIsThrottled(t *testing.T) {
 	if patches != 1 {
 		t.Fatalf("patches=%d want 1", patches)
 	}
-	now = now.Add(31 * time.Second)
+	now = now.Add(5*time.Minute + time.Second)
 	if err := executor.touchLastUsed(credential); err != nil {
 		t.Fatal(err)
 	}

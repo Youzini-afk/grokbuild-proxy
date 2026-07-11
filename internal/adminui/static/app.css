@@ -107,6 +107,10 @@ textarea {
   gap: 14px;
 }
 
+.pager {
+  margin-top: 16px;
+}
+
 .btn {
   appearance: none;
   border: 1px solid var(--border-strong);

@@ -10,6 +10,9 @@
     route: "login",
     system: null,
     busy: false,
+    credentialOffset: 0,
+    credentialLimit: 100,
+    credentialTotal: 0,
   };
 
   // ---------- DOM helpers (no innerHTML for untrusted data) ----------
@@ -295,15 +298,24 @@
 
   // ---------- Credentials ----------
 
-  function loadCredentials() {
+  function loadCredentials(reset) {
     var list = $("cred-list");
     var empty = $("cred-empty");
     if (!list) return;
+    if (reset === true) state.credentialOffset = 0;
     clear(list);
     show(empty, false);
-    api("GET", "/admin/credentials")
+    api("GET", "/admin/credentials?limit=" + state.credentialLimit + "&offset=" + state.credentialOffset)
       .then(function (data) {
         var creds = (data && data.credentials) || [];
+        state.credentialTotal = Number((data && data.total) || creds.length);
+        var start = creds.length ? state.credentialOffset + 1 : 0;
+        var end = state.credentialOffset + creds.length;
+        setText($("cred-page-status"), start + "-" + end + " / " + state.credentialTotal);
+        var prev = $("btn-cred-prev");
+        var next = $("btn-cred-next");
+        if (prev) prev.disabled = state.credentialOffset <= 0;
+        if (next) next.disabled = end >= state.credentialTotal;
         if (!creds.length) {
           show(empty, true);
           return;
@@ -366,12 +378,7 @@
     if (c.access_token) {
       meta.appendChild(lineMeta("访问令牌(脱敏)", c.access_token));
     }
-    var usageBox = el("div", "usage-box");
-    usageBox.appendChild(el("div", "muted", "额度加载中…"));
-    meta.appendChild(usageBox);
     card.appendChild(meta);
-    // Async fill usage summary on each card (no raw JSON).
-    fillCredentialUsage(usageBox, c.id);
 
     var prioRow = el("div", "priority-row");
     prioRow.appendChild(el("span", "label", "优先级"));
@@ -1142,7 +1149,20 @@
     }
 
     var credRefresh = $("btn-cred-refresh-list");
-    if (credRefresh) credRefresh.addEventListener("click", loadCredentials);
+    if (credRefresh) credRefresh.addEventListener("click", function () { loadCredentials(true); });
+
+    var credPrev = $("btn-cred-prev");
+    if (credPrev) credPrev.addEventListener("click", function () {
+      state.credentialOffset = Math.max(0, state.credentialOffset - state.credentialLimit);
+      loadCredentials(false);
+    });
+    var credNext = $("btn-cred-next");
+    if (credNext) credNext.addEventListener("click", function () {
+      if (state.credentialOffset + state.credentialLimit < state.credentialTotal) {
+        state.credentialOffset += state.credentialLimit;
+        loadCredentials(false);
+      }
+    });
 
     var impDef = $("btn-import-default");
     if (impDef) impDef.addEventListener("click", importDefaultGrok);

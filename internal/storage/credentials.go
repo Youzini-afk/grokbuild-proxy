@@ -40,6 +40,14 @@ type credentialsDoc struct {
 	Credentials []Credential `json:"credentials"`
 }
 
+// BulkUpsertResult is the per-record outcome of a transactional bulk import.
+// All successful records are persisted with one read and one atomic write.
+type BulkUpsertResult struct {
+	Credential Credential
+	Created    bool
+	Err        error
+}
+
 // ListCredentials returns all credentials sorted by priority desc, then id.
 func (s *Store) ListCredentials() ([]Credential, error) {
 	var out []Credential
@@ -231,6 +239,161 @@ func (s *Store) UpsertCredential(in CreateCredentialInput) (Credential, bool, er
 	return result, created, err
 }
 
+// BulkUpsertCredentials imports credentials in one store transaction. Invalid
+// records are reported individually; valid records are committed together with
+// a single atomic file replacement. This avoids O(N) full-file rewrites.
+func (s *Store) BulkUpsertCredentials(inputs []CreateCredentialInput) ([]BulkUpsertResult, error) {
+	results := make([]BulkUpsertResult, len(inputs))
+	if len(inputs) == 0 {
+		return results, nil
+	}
+	err := s.withLock(func() error {
+		doc, err := s.loadCredentials()
+		if err != nil {
+			return err
+		}
+		index := newCredentialIdentityIndex(doc.Credentials)
+		now := nowUTC()
+		dirty := false
+		for n, in := range inputs {
+			if in.AccessToken == "" && in.RefreshToken == "" {
+				results[n].Err = fmt.Errorf("storage: access_token or refresh_token required")
+				continue
+			}
+			if idx := index.find(doc.Credentials, in); idx >= 0 {
+				cur := doc.Credentials[idx]
+				applyCredentialInput(&cur, in)
+				cur.UpdatedAt = now
+				doc.Credentials[idx] = cur
+				index.add(idx, cur)
+				results[n].Credential = cur
+				dirty = true
+				continue
+			}
+
+			id, idErr := newID("cred")
+			if idErr != nil {
+				results[n].Err = idErr
+				continue
+			}
+			enabled := true
+			if in.Enabled != nil {
+				enabled = *in.Enabled
+			}
+			priority := 100
+			if in.Priority != nil {
+				priority = *in.Priority
+			}
+			created := Credential{
+				ID: id, Enabled: enabled, Priority: priority,
+				CreatedAt: now, UpdatedAt: now,
+			}
+			applyCredentialInput(&created, in)
+			doc.Credentials = append(doc.Credentials, created)
+			idx := len(doc.Credentials) - 1
+			index.add(idx, created)
+			results[n] = BulkUpsertResult{Credential: created, Created: true}
+			dirty = true
+		}
+		if !dirty {
+			return nil
+		}
+		return s.saveCredentials(doc)
+	})
+	return results, err
+}
+
+func applyCredentialInput(cur *Credential, in CreateCredentialInput) {
+	if cur == nil {
+		return
+	}
+	if in.Name != "" {
+		cur.Name = in.Name
+	}
+	if in.Email != "" {
+		cur.Email = in.Email
+	}
+	if in.UserID != "" {
+		cur.UserID = in.UserID
+	}
+	if in.TeamID != "" {
+		cur.TeamID = in.TeamID
+	}
+	if in.SourceKey != "" {
+		cur.SourceKey = in.SourceKey
+	}
+	if in.OIDCClientID != "" {
+		cur.OIDCClientID = in.OIDCClientID
+	}
+	if in.AccessToken != "" {
+		cur.AccessToken = in.AccessToken
+	}
+	if in.RefreshToken != "" {
+		cur.RefreshToken = in.RefreshToken
+	}
+	if !in.ExpiresAt.IsZero() {
+		cur.ExpiresAt = in.ExpiresAt.UTC().Truncate(time.Second)
+	}
+}
+
+type credentialIdentityIndex struct {
+	users   map[string][]int
+	emails  map[string][]int
+	sources map[string][]int
+	refresh map[string][]int
+}
+
+func newCredentialIdentityIndex(credentials []Credential) *credentialIdentityIndex {
+	idx := &credentialIdentityIndex{
+		users: make(map[string][]int), emails: make(map[string][]int),
+		sources: make(map[string][]int), refresh: make(map[string][]int),
+	}
+	for i, credential := range credentials {
+		idx.add(i, credential)
+	}
+	return idx
+}
+
+func (idx *credentialIdentityIndex) add(i int, c Credential) {
+	appendUnique := func(target map[string][]int, key string) {
+		if key == "" {
+			return
+		}
+		for _, existing := range target[key] {
+			if existing == i {
+				return
+			}
+		}
+		target[key] = append(target[key], i)
+	}
+	appendUnique(idx.users, c.UserID)
+	appendUnique(idx.emails, strings.ToLower(c.Email))
+	appendUnique(idx.sources, c.SourceKey)
+	appendUnique(idx.refresh, c.RefreshToken)
+}
+
+func (idx *credentialIdentityIndex) find(credentials []Credential, in CreateCredentialInput) int {
+	candidateGroups := [][]int{
+		idx.users[in.UserID],
+		idx.emails[strings.ToLower(in.Email)],
+		idx.sources[in.SourceKey],
+		idx.refresh[in.RefreshToken],
+	}
+	seen := make(map[int]struct{})
+	for _, candidates := range candidateGroups {
+		for _, candidate := range candidates {
+			if _, ok := seen[candidate]; ok {
+				continue
+			}
+			seen[candidate] = struct{}{}
+			if candidate >= 0 && candidate < len(credentials) && sameCredentialIdentity(credentials[candidate], in) {
+				return candidate
+			}
+		}
+	}
+	return -1
+}
+
 func sameCredentialIdentity(c Credential, in CreateCredentialInput) bool {
 	if in.UserID != "" && c.UserID == in.UserID {
 		return in.TeamID == "" || c.TeamID == "" || c.TeamID == in.TeamID
@@ -373,12 +536,25 @@ func (s *Store) loadCredentials() (credentialsDoc, error) {
 	if doc.Credentials == nil {
 		doc.Credentials = []Credential{}
 	}
+	// A syntactically valid but implausibly small primary is usually an
+	// interrupted deployment or wrong-volume write. Prefer the last snapshot;
+	// intentional deletes happen one record at a time and never trigger this.
+	var backup credentialsDoc
+	if err := readBackupJSON(s.credentialsPath(), &backup); err == nil &&
+		len(backup.Credentials) >= 100 && len(doc.Credentials)*4 < len(backup.Credentials) {
+		return backup, nil
+	}
 	return doc, nil
 }
 
 func (s *Store) saveCredentials(doc credentialsDoc) error {
 	if doc.Credentials == nil {
 		doc.Credentials = []Credential{}
+	}
+	var current credentialsDoc
+	if err := readJSONFile(s.credentialsPath(), &current); err == nil &&
+		len(current.Credentials) >= 100 && len(doc.Credentials)*2 < len(current.Credentials) {
+		return fmt.Errorf("storage: refusing suspicious credential count drop from %d to %d", len(current.Credentials), len(doc.Credentials))
 	}
 	return writeJSONFile(s.credentialsPath(), doc)
 }

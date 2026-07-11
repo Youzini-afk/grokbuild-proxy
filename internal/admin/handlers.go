@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -36,6 +37,10 @@ type Store interface {
 
 type credentialUpserter interface {
 	UpsertCredential(in storage.CreateCredentialInput) (storage.Credential, bool, error)
+}
+
+type credentialBulkUpserter interface {
+	BulkUpsertCredentials([]storage.CreateCredentialInput) ([]storage.BulkUpsertResult, error)
 }
 
 // TokenService refreshes credentials and fetches billing.
@@ -188,11 +193,24 @@ func (h *Handlers) ListCredentials(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	out := make([]maskedCredential, 0, len(creds))
-	for _, c := range creds {
+	limit := queryInt(r, "limit", 100, 1, 1000)
+	offset := queryInt(r, "offset", 0, 0, len(creds))
+	end := offset + limit
+	if end > len(creds) {
+		end = len(creds)
+	}
+	out := make([]maskedCredential, 0, end-offset)
+	for _, c := range creds[offset:end] {
 		out = append(out, maskCredential(c))
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"credentials": out})
+	nextOffset := 0
+	if end < len(creds) {
+		nextOffset = end
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"credentials": out, "total": len(creds), "offset": offset,
+		"limit": limit, "next_offset": nextOffset,
+	})
 }
 
 // CreateCredential POST /admin/credentials
@@ -280,61 +298,82 @@ func (h *Handlers) ImportGrok(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	credentials := make([]maskedCredential, 0, len(imported))
-	results := make([]map[string]any, 0, len(imported))
-	createdCount := 0
-	updatedCount := 0
-	failedCount := 0
-	upserter, canUpsert := h.Store.(credentialUpserter)
+	inputs := make([]storage.CreateCredentialInput, 0, len(imported))
 	for _, ic := range imported {
 		name := ic.Email
 		if name == "" {
 			name = ic.SourceKey
 		}
-		input := storage.CreateCredentialInput{
-			Name:         name,
-			Email:        ic.Email,
-			UserID:       ic.UserID,
-			TeamID:       ic.TeamID,
-			SourceKey:    ic.SourceKey,
-			OIDCClientID: ic.OIDCClientID,
-			AccessToken:  ic.AccessToken,
-			RefreshToken: ic.RefreshToken,
-			ExpiresAt:    ic.ExpiresAt,
-		}
-		var c storage.Credential
-		var wasCreated bool
-		var cerr error
-		if canUpsert {
-			c, wasCreated, cerr = upserter.UpsertCredential(input)
-		} else {
-			c, cerr = h.Store.CreateCredential(input)
-			wasCreated = cerr == nil
-		}
-		if cerr != nil {
-			failedCount++
-			results = append(results, map[string]any{
-				"source_key": ic.SourceKey,
-				"status":     "failed",
-				"error":      cerr.Error(),
-			})
-			continue
-		}
-		if wasCreated {
-			createdCount++
-		} else {
-			updatedCount++
-		}
-		status := "updated"
-		if wasCreated {
-			status = "created"
-		}
-		results = append(results, map[string]any{
-			"source_key": ic.SourceKey,
-			"status":     status,
-			"id":         c.ID,
+		inputs = append(inputs, storage.CreateCredentialInput{
+			Name: name, Email: ic.Email, UserID: ic.UserID, TeamID: ic.TeamID,
+			SourceKey: ic.SourceKey, OIDCClientID: ic.OIDCClientID,
+			AccessToken: ic.AccessToken, RefreshToken: ic.RefreshToken, ExpiresAt: ic.ExpiresAt,
 		})
-		credentials = append(credentials, maskCredential(c))
+	}
+
+	results := make([]map[string]any, 0, min(len(imported), 100))
+	createdCount := 0
+	updatedCount := 0
+	failedCount := 0
+	if bulk, ok := h.Store.(credentialBulkUpserter); ok {
+		bulkResults, bulkErr := bulk.BulkUpsertCredentials(inputs)
+		if bulkErr != nil {
+			writeErr(w, http.StatusInternalServerError, bulkErr.Error())
+			return
+		}
+		for i, result := range bulkResults {
+			if result.Err != nil {
+				failedCount++
+				if len(results) < 100 {
+					results = append(results, map[string]any{"source_key": imported[i].SourceKey, "status": "failed", "error": result.Err.Error()})
+				}
+				continue
+			}
+			if result.Created {
+				createdCount++
+			} else {
+				updatedCount++
+			}
+			if len(results) < 100 {
+				resultStatus := "updated"
+				if result.Created {
+					resultStatus = "created"
+				}
+				results = append(results, map[string]any{"source_key": imported[i].SourceKey, "status": resultStatus, "id": result.Credential.ID})
+			}
+		}
+	} else {
+		upserter, canUpsert := h.Store.(credentialUpserter)
+		for i, input := range inputs {
+			var c storage.Credential
+			var wasCreated bool
+			var cerr error
+			if canUpsert {
+				c, wasCreated, cerr = upserter.UpsertCredential(input)
+			} else {
+				c, cerr = h.Store.CreateCredential(input)
+				wasCreated = cerr == nil
+			}
+			if cerr != nil {
+				failedCount++
+				if len(results) < 100 {
+					results = append(results, map[string]any{"source_key": imported[i].SourceKey, "status": "failed", "error": cerr.Error()})
+				}
+				continue
+			}
+			if wasCreated {
+				createdCount++
+			} else {
+				updatedCount++
+			}
+			if len(results) < 100 {
+				status := "updated"
+				if wasCreated {
+					status = "created"
+				}
+				results = append(results, map[string]any{"source_key": imported[i].SourceKey, "status": status, "id": c.ID})
+			}
+		}
 	}
 	status := http.StatusOK
 	if createdCount > 0 {
@@ -344,12 +383,12 @@ func (h *Handlers) ImportGrok(w http.ResponseWriter, r *http.Request) {
 		status = http.StatusMultiStatus
 	}
 	writeJSON(w, status, map[string]any{
-		"imported":    len(credentials),
-		"created":     createdCount,
-		"updated":     updatedCount,
-		"failed":      failedCount,
-		"results":     results,
-		"credentials": credentials,
+		"imported":          createdCount + updatedCount,
+		"created":           createdCount,
+		"updated":           updatedCount,
+		"failed":            failedCount,
+		"results":           results,
+		"results_truncated": len(imported) > len(results),
 	})
 }
 
@@ -547,6 +586,24 @@ func (h *Handlers) System(w http.ResponseWriter, r *http.Request) {
 		"limits": h.Config.Limits,
 		"pool":   summarizePool(credentials, time.Now()),
 	})
+}
+
+func queryInt(r *http.Request, key string, fallback, minimum, maximum int) int {
+	if r == nil {
+		return fallback
+	}
+	value := strings.TrimSpace(r.URL.Query().Get(key))
+	if value == "" {
+		return fallback
+	}
+	n, err := strconv.Atoi(value)
+	if err != nil || n < minimum {
+		return fallback
+	}
+	if maximum >= minimum && n > maximum {
+		return maximum
+	}
+	return n
 }
 
 func decodeJSON(r *http.Request, max int64, dest any) error {

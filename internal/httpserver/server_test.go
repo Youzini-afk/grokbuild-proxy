@@ -211,6 +211,7 @@ func TestBootstrapClientCanBeRevoked(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	defer store.Close()
 	apiKey, _, _, _, err := store.EnsureBootstrapKeys("", "")
 	if err != nil {
 		t.Fatal(err)

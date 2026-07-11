@@ -22,8 +22,6 @@ type healthStore interface {
 	PatchCredential(id string, mutate func(*storage.Credential) error) (storage.Credential, error)
 }
 
-const successPersistenceInterval = 30 * time.Second
-
 type healthSnapshot struct {
 	version       uint64
 	failureCount  int
@@ -142,10 +140,7 @@ func (s *Selector) MarkSuccess(credID, stickyKey string, now time.Time) {
 	st := s.ensureState(credID)
 	needsPersist := st.FailureCount != 0 ||
 		!st.CooldownUntil.IsZero() ||
-		st.LastError != "" ||
-		st.LastSuccessPersistedAt.IsZero() ||
-		now.Before(st.LastSuccessPersistedAt) ||
-		now.Sub(st.LastSuccessPersistedAt) >= successPersistenceInterval
+		st.LastError != ""
 	st.FailureCount = 0
 	st.CooldownUntil = time.Time{}
 	st.LastError = ""
