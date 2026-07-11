@@ -370,6 +370,44 @@ func TestExportCredentialsProducesReimportableGrokJSON(t *testing.T) {
 	}
 }
 
+func TestAsyncImportJobCompletes(t *testing.T) {
+	store, err := storage.New(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	h := &Handlers{Store: store}
+	body := `{"raw":{"accounts":[{"key":"async-a","refresh_token":"async-r","user_id":"async-user"}]}}`
+	req := httptest.NewRequest(http.MethodPost, "/admin/credentials/import-grok?async=true", strings.NewReader(body))
+	rr := httptest.NewRecorder()
+	h.ImportGrok(rr, req)
+	if rr.Code != http.StatusAccepted {
+		t.Fatalf("status=%d body=%s", rr.Code, rr.Body.String())
+	}
+	var accepted struct {
+		Job ImportJob `json:"job"`
+	}
+	if err := json.Unmarshal(rr.Body.Bytes(), &accepted); err != nil || accepted.Job.ID == "" {
+		t.Fatalf("job=%+v err=%v", accepted.Job, err)
+	}
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		h.importMu.Lock()
+		job := *h.importJobs[accepted.Job.ID]
+		h.importMu.Unlock()
+		if job.Status == "completed" {
+			if job.Outcome == nil || job.Outcome.Imported != 1 {
+				t.Fatalf("job=%+v", job)
+			}
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("job did not complete: %+v", job)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
 type fakeDeviceOAuth struct {
 	polls int
 }

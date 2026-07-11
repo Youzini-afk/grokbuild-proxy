@@ -77,8 +77,10 @@ type CooldownConfig struct {
 // LimitsConfig enforces request size, timeout and concurrency caps.
 type LimitsConfig struct {
 	MaxBodyBytes      int64 `yaml:"max_body_bytes"`
+	MaxImportBytes    int64 `yaml:"max_import_bytes"`
 	RequestTimeoutSec int   `yaml:"request_timeout_sec"`
 	MaxConcurrent     int   `yaml:"max_concurrent"`
+	QueueWaitMS       int   `yaml:"queue_wait_ms"`
 }
 
 // LoggingConfig controls structured logging verbosity.
@@ -143,8 +145,10 @@ func Default() Config {
 		},
 		Limits: LimitsConfig{
 			MaxBodyBytes:      20 * 1024 * 1024,
+			MaxImportBytes:    128 * 1024 * 1024,
 			RequestTimeoutSec: 600,
 			MaxConcurrent:     64,
+			QueueWaitMS:       250,
 		},
 		Logging: LoggingConfig{
 			Level: "info",
@@ -256,11 +260,17 @@ func (c Config) Validate() error {
 	if c.Limits.MaxBodyBytes <= 0 {
 		return fmt.Errorf("limits.max_body_bytes must be > 0")
 	}
+	if c.Limits.MaxImportBytes <= 0 {
+		return fmt.Errorf("limits.max_import_bytes must be > 0")
+	}
 	if c.Limits.RequestTimeoutSec <= 0 {
 		return fmt.Errorf("limits.request_timeout_sec must be > 0")
 	}
 	if c.Limits.MaxConcurrent <= 0 {
 		return fmt.Errorf("limits.max_concurrent must be > 0")
+	}
+	if c.Limits.QueueWaitMS < 0 {
+		return fmt.Errorf("limits.queue_wait_ms must be >= 0")
 	}
 	switch strings.ToLower(strings.TrimSpace(c.Logging.Level)) {
 	case "debug", "info", "warn", "warning", "error":

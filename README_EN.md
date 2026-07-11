@@ -136,6 +136,7 @@ ghcr.io/greygung/grokbuild-proxy
 - [Design](DESIGN.md)
 - [Compatibility matrix](COMPATIBILITY.md)
 - [Operations](docs/operations.md)
+- [Zeabur deployment](docs/zeabur.md)
 - [Security policy](SECURITY.md)
 - [Disclaimer](DISCLAIMER.md)
 - [Contributing](CONTRIBUTING.md)
@@ -148,7 +149,7 @@ ghcr.io/greygung/grokbuild-proxy
 - `top_k` and `stop_sequences` are not forwarded to Grok reasoning models.
 - Rich Anthropic hosted-tool result/citation blocks are reduced.
 - Only hosted web search has a dedicated Anthropic server-tool mapping.
-- OAuth refresh is request-driven, not scheduled in the background.
+- Cold-account OAuth refresh is demand-driven; recently active accounts use a bounded background scheduler.
 - The upstream CLI protocol is unstable and may change.
 - This is a trusted-operator tool, not a multi-tenant service.
 

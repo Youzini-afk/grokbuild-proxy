@@ -47,7 +47,9 @@ lb:
     max_sec: 3600
 limits:
   max_body_bytes: 20971520
+  max_import_bytes: 134217728
   request_timeout_sec: 600
   max_concurrent: 64
+  queue_wait_ms: 250
 logging:
   level: info

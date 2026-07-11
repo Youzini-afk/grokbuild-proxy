@@ -305,7 +305,10 @@
     if (reset === true) state.credentialOffset = 0;
     clear(list);
     show(empty, false);
-    api("GET", "/admin/credentials?limit=" + state.credentialLimit + "&offset=" + state.credentialOffset)
+    var search = ($("cred-search") && $("cred-search").value) || "";
+    var statusFilter = ($("cred-status-filter") && $("cred-status-filter").value) || "";
+    api("GET", "/admin/credentials?limit=" + state.credentialLimit + "&offset=" + state.credentialOffset +
+      "&q=" + encodeURIComponent(search) + "&status=" + encodeURIComponent(statusFilter))
       .then(function (data) {
         var creds = (data && data.credentials) || [];
         state.credentialTotal = Number((data && data.total) || creds.length);
@@ -844,11 +847,16 @@
     var button = $("btn-import-file");
     if (button) button.disabled = true;
     toast("正在导入 " + file.name + "…", "");
-    uploadJSONFile("/admin/credentials/import-grok", file)
+    uploadJSONFile("/admin/credentials/import-grok?async=true", file)
       .then(function (data) {
-        var n = (data && data.imported) || 0;
+        if (!data || !data.job || !data.job.id) throw new Error("导入任务创建失败");
+        toast("导入任务已创建，共 " + data.job.total + " 条", "");
+        return pollImportJob(data.job.id);
+      })
+      .then(function (job) {
+        var n = (job && job.outcome && job.outcome.imported) || 0;
         toast("已导入 " + n + " 条凭证", "ok");
-        loadCredentials();
+        loadCredentials(true);
       })
       .catch(function (err) {
         toast("导入失败: " + err.message, "err");
@@ -858,6 +866,52 @@
         var input = $("import-file-input");
         if (input) input.value = "";
       });
+  }
+
+  function pollImportJob(id) {
+    return new Promise(function (resolve, reject) {
+      function poll() {
+        api("GET", "/admin/import-jobs/" + encodeURIComponent(id))
+          .then(function (data) {
+            var job = data && data.job;
+            if (!job) throw new Error("导入任务不存在");
+            if (job.status === "completed") return resolve(job);
+            if (job.status === "failed" || job.status === "cancelled") {
+              return reject(new Error(job.error || "导入任务" + job.status));
+            }
+            setTimeout(poll, 750);
+          })
+          .catch(reject);
+      }
+      poll();
+    });
+  }
+
+  function exportCredentials() {
+    var headers = {};
+    if (state.key) headers.Authorization = "Bearer " + state.key;
+    fetch("/admin/credentials/export", { headers: headers })
+      .then(function (res) {
+        if (!res.ok) throw new Error("导出失败 HTTP " + res.status);
+        return res.blob();
+      })
+      .then(function (blob) {
+        var link = document.createElement("a");
+        link.href = URL.createObjectURL(blob);
+        link.download = "grokbuild-credentials.json";
+        link.click();
+        setTimeout(function () { URL.revokeObjectURL(link.href); }, 1000);
+      })
+      .catch(function (err) { toast(err.message, "err"); });
+  }
+
+  function createSystemBackup() {
+    api("POST", "/admin/system/backup", {})
+      .then(function (data) {
+        var name = data && data.backup && data.backup.name;
+        toast("备份已创建: " + (name || "完成"), "ok");
+      })
+      .catch(function (err) { toast("备份失败: " + err.message, "err"); });
   }
 
   // ---------- Clients ----------
@@ -1150,6 +1204,12 @@
 
     var credRefresh = $("btn-cred-refresh-list");
     if (credRefresh) credRefresh.addEventListener("click", function () { loadCredentials(true); });
+    var credSearch = $("cred-search");
+    if (credSearch) credSearch.addEventListener("keydown", function (event) {
+      if (event.key === "Enter") loadCredentials(true);
+    });
+    var credStatus = $("cred-status-filter");
+    if (credStatus) credStatus.addEventListener("change", function () { loadCredentials(true); });
 
     var credPrev = $("btn-cred-prev");
     if (credPrev) credPrev.addEventListener("click", function () {
@@ -1184,6 +1244,9 @@
       });
     }
 
+    var exportButton = $("btn-export-credentials");
+    if (exportButton) exportButton.addEventListener("click", exportCredentials);
+
     var clientRefresh = $("btn-client-refresh");
     if (clientRefresh) clientRefresh.addEventListener("click", loadClients);
 
@@ -1192,6 +1255,8 @@
 
     var sysRefresh = $("btn-system-refresh");
     if (sysRefresh) sysRefresh.addEventListener("click", loadSystem);
+    var sysBackup = $("btn-system-backup");
+    if (sysBackup) sysBackup.addEventListener("click", createSystemBackup);
 
     var copyInt = $("btn-copy-integration");
     if (copyInt) copyInt.addEventListener("click", copyIntegration);

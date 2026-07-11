@@ -25,11 +25,37 @@ func RequestIDFromContext(ctx context.Context) string {
 
 // Metrics contains low-cardinality process counters.
 type Metrics struct {
-	requests      atomic.Uint64
-	errors        atomic.Uint64
-	inflight      atomic.Int64
-	responseBytes atomic.Uint64
-	durationNanos atomic.Uint64
+	requests            atomic.Uint64
+	errors              atomic.Uint64
+	inflight            atomic.Int64
+	responseBytes       atomic.Uint64
+	durationNanos       atomic.Uint64
+	credentialPicks     atomic.Uint64
+	credentialFailovers atomic.Uint64
+	credentialFailures  atomic.Uint64
+	regionalModelErrors atomic.Uint64
+}
+
+func (m *Metrics) ObserveCredentialPick(failover bool) {
+	if m == nil {
+		return
+	}
+	m.credentialPicks.Add(1)
+	if failover {
+		m.credentialFailovers.Add(1)
+	}
+}
+
+func (m *Metrics) ObserveCredentialFailure() {
+	if m != nil {
+		m.credentialFailures.Add(1)
+	}
+}
+
+func (m *Metrics) ObserveRegionalModelError() {
+	if m != nil {
+		m.regionalModelErrors.Add(1)
+	}
 }
 
 func (m *Metrics) Handler() http.Handler {
@@ -45,12 +71,22 @@ func (m *Metrics) Handler() http.Handler {
 				"# TYPE grokbuild_http_response_bytes_total counter\n"+
 				"grokbuild_http_response_bytes_total %d\n"+
 				"# TYPE grokbuild_http_request_duration_seconds_sum counter\n"+
-				"grokbuild_http_request_duration_seconds_sum %.6f\n",
+				"grokbuild_http_request_duration_seconds_sum %.6f\n"+
+				"# TYPE grokbuild_credential_picks_total counter\n"+
+				"grokbuild_credential_picks_total %d\n"+
+				"# TYPE grokbuild_credential_failovers_total counter\n"+
+				"grokbuild_credential_failovers_total %d\n"+
+				"# TYPE grokbuild_credential_failures_total counter\n"+
+				"grokbuild_credential_failures_total %d\n"+
+				"# TYPE grokbuild_regional_model_errors_total counter\n"+
+				"grokbuild_regional_model_errors_total %d\n",
 			m.requests.Load(),
 			m.errors.Load(),
 			m.inflight.Load(),
 			m.responseBytes.Load(),
 			float64(m.durationNanos.Load())/float64(time.Second),
+			m.credentialPicks.Load(), m.credentialFailovers.Load(),
+			m.credentialFailures.Load(), m.regionalModelErrors.Load(),
 		)
 	})
 }

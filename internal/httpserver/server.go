@@ -74,6 +74,7 @@ func New(opts Options) http.Handler {
 		AdminKey:       opts.AdminKey,
 		MaxBody:        opts.Config.Limits.MaxBodyBytes,
 		MaxConcurrent:  opts.Config.Limits.MaxConcurrent,
+		QueueWait:      time.Duration(opts.Config.Limits.QueueWaitMS) * time.Millisecond,
 		RequestTimeout: opts.Config.RequestTimeout(),
 		Logger:         opts.Logger,
 		Metrics:        metrics,

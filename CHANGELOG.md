@@ -5,6 +5,29 @@ Versioning and keeps the latest release under GitHub Releases.
 
 ## [Unreleased]
 
+### Added
+
+- SQLite WAL credential storage with automatic recovery-aware migration from
+  legacy JSON snapshots and portable credential export.
+- Asynchronous large-import jobs, progress polling, 128 MiB import limit, and
+  server-side credential pagination.
+- Versioned in-memory credential/client snapshots, model-scoped cooldowns,
+  bounded hot-account refresh workers, and coalesced runtime-state writes.
+- Optional AES-256-GCM OAuth-token encryption with
+  `CREDENTIAL_ENCRYPTION_KEY`.
+- Verified online backups, checksums, retention, CLI verification and offline
+  restore with a pre-restore snapshot.
+- Credential-pick, failover, failure, and regional-model Prometheus counters.
+
+### Changed
+
+- Large imports use one transaction instead of rewriting the complete account
+  store once per credential.
+- Admin credential lists are paginated and billing is loaded only on demand.
+- Regional model errors no longer consume multiple credential attempts.
+- API/admin/data-directory settings can be supplied through `API_KEY`,
+  `ADMIN_KEY`, and `DATA_DIR`.
+
 ## [0.1.0] - 2026-07-10
 
 ### Added

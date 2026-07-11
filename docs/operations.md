@@ -32,6 +32,23 @@ Stop the process before copying or restoring `data_dir`. The store holds
 `.instance.lock` for its lifetime and rejects a second process using the same
 directory.
 
+Create and verify an online backup:
+
+```bash
+grokbuild-proxy -config config.yaml -backup
+grokbuild-proxy -verify-backup /app/data/backups/grokbuild-....db
+```
+
+Restore while the service is stopped. The current database is retained as a
+`grokbuild.db.pre-restore-*` snapshot:
+
+```bash
+grokbuild-proxy -config config.yaml -restore-backup /app/data/backups/grokbuild-....db
+```
+
+The Admin System page can also create a backup. Ten verified generations and
+their SHA-256 sidecars are retained by default.
+
 Docker Compose uses the `grokbuild-data` named volume. Stop the service before
 backing that volume up with your normal Docker volume backup tooling.
 

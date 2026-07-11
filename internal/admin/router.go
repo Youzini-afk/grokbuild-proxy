@@ -25,6 +25,12 @@ func (h *Handlers) Register(mux *http.ServeMux) {
 	mux.HandleFunc("GET /admin/credentials/export", h.ExportCredentials)
 	mux.HandleFunc("POST /admin/credentials", h.CreateCredential)
 	mux.HandleFunc("POST /admin/credentials/import-grok", h.ImportGrok)
+	mux.HandleFunc("GET /admin/import-jobs/{id}", func(w http.ResponseWriter, r *http.Request) {
+		h.GetImportJob(w, r, r.PathValue("id"))
+	})
+	mux.HandleFunc("DELETE /admin/import-jobs/{id}", func(w http.ResponseWriter, r *http.Request) {
+		h.CancelImportJob(w, r, r.PathValue("id"))
+	})
 	mux.HandleFunc("POST /admin/oauth/device/start", h.StartDeviceLogin)
 	mux.HandleFunc("POST /admin/oauth/device/poll", h.PollDeviceLogin)
 
@@ -54,6 +60,7 @@ func (h *Handlers) Register(mux *http.ServeMux) {
 
 	// System
 	mux.HandleFunc("GET /admin/system", h.System)
+	mux.HandleFunc("POST /admin/system/backup", h.CreateBackup)
 
 	// Fallback for non-pattern muxes / unexpected method combos.
 	mux.HandleFunc("/admin/", h.dispatchFallback)
@@ -76,6 +83,15 @@ func (h *Handlers) dispatchFallback(w http.ResponseWriter, r *http.Request) {
 		h.CreateCredential(w, r)
 	case path == "/admin/credentials/import-grok" && r.Method == http.MethodPost:
 		h.ImportGrok(w, r)
+	case strings.HasPrefix(path, "/admin/import-jobs/"):
+		id := strings.TrimPrefix(path, "/admin/import-jobs/")
+		if r.Method == http.MethodGet {
+			h.GetImportJob(w, r, id)
+		} else if r.Method == http.MethodDelete {
+			h.CancelImportJob(w, r, id)
+		} else {
+			writeErr(w, http.StatusMethodNotAllowed, "method not allowed")
+		}
 	case path == "/admin/oauth/device/start" && r.Method == http.MethodPost:
 		h.StartDeviceLogin(w, r)
 	case path == "/admin/oauth/device/poll" && r.Method == http.MethodPost:
@@ -86,6 +102,8 @@ func (h *Handlers) dispatchFallback(w http.ResponseWriter, r *http.Request) {
 		h.CreateClient(w, r)
 	case path == "/admin/system" && r.Method == http.MethodGet:
 		h.System(w, r)
+	case path == "/admin/system/backup" && r.Method == http.MethodPost:
+		h.CreateBackup(w, r)
 	default:
 		// /admin/credentials/{id}/...
 		if id, rest, ok := cutAfterPrefix(path, "/admin/credentials/"); ok {

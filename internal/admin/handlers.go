@@ -47,6 +47,14 @@ type credentialExporter interface {
 	ExportCredentialsJSON() ([]byte, error)
 }
 
+type backupCreator interface {
+	CreateBackup() (storage.BackupInfo, error)
+}
+
+type storageStatsProvider interface {
+	Stats() storage.Stats
+}
+
 // TokenService refreshes credentials and fetches billing.
 type TokenService interface {
 	ForceRefreshToken(ctx context.Context, credID string) (auth.TokenSet, storage.Credential, error)
@@ -68,6 +76,10 @@ type Handlers struct {
 
 	deviceMu       sync.Mutex
 	deviceSessions map[string]deviceSession
+	importMu       sync.Mutex
+	importJobs     map[string]*ImportJob
+	importCancels  map[string]context.CancelFunc
+	importSem      chan struct{}
 }
 
 // maskedCredential is a credential view with secrets redacted.
@@ -141,6 +153,13 @@ func (h *Handlers) maxBody() int64 {
 	return 1 << 20
 }
 
+func (h *Handlers) maxImportBody() int64 {
+	if h != nil && h.Config.Limits.MaxImportBytes > 0 {
+		return h.Config.Limits.MaxImportBytes
+	}
+	return h.maxBody()
+}
+
 func (h *Handlers) version() string {
 	if h != nil && h.Version != "" {
 		return h.Version
@@ -196,6 +215,40 @@ func (h *Handlers) ListCredentials(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, err.Error())
 		return
+	}
+	query := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("q")))
+	statusFilter := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("status")))
+	if query != "" || statusFilter != "" {
+		now := time.Now()
+		filtered := make([]storage.Credential, 0, len(creds))
+		for _, credential := range creds {
+			if query != "" && !strings.Contains(strings.ToLower(strings.Join([]string{
+				credential.ID, credential.Name, credential.Email, credential.UserID, credential.TeamID,
+			}, " ")), query) {
+				continue
+			}
+			cooling := credential.CooldownUntil != nil && credential.CooldownUntil.After(now)
+			switch statusFilter {
+			case "enabled":
+				if !credential.Enabled {
+					continue
+				}
+			case "disabled":
+				if credential.Enabled {
+					continue
+				}
+			case "cooling":
+				if !credential.Enabled || !cooling {
+					continue
+				}
+			case "available":
+				if !credential.Enabled || cooling {
+					continue
+				}
+			}
+			filtered = append(filtered, credential)
+		}
+		creds = filtered
 	}
 	limit := queryInt(r, "limit", 100, 1, 1000)
 	offset := queryInt(r, "offset", 0, 0, len(creds))
@@ -291,7 +344,7 @@ func (h *Handlers) ImportGrok(w http.ResponseWriter, r *http.Request) {
 		Raw  json.RawMessage `json:"raw"`
 	}
 	if strings.HasPrefix(strings.ToLower(strings.TrimSpace(r.Header.Get("Content-Type"))), "multipart/form-data") {
-		raw, err := readMultipartJSONFile(w, r, h.maxBody())
+		raw, err := readMultipartJSONFile(w, r, h.maxImportBody())
 		if err != nil {
 			writeErr(w, http.StatusBadRequest, err.Error())
 			return
@@ -299,7 +352,7 @@ func (h *Handlers) ImportGrok(w http.ResponseWriter, r *http.Request) {
 		body.Raw = raw
 	} else {
 		// Body is optional; empty body → default path. Malformed JSON is 400 (not silent fallback).
-		if err := decodeJSON(r, h.maxBody(), &body); err != nil {
+		if err := decodeJSON(r, h.maxImportBody(), &body); err != nil {
 			writeErr(w, http.StatusBadRequest, err.Error())
 			return
 		}
@@ -322,98 +375,17 @@ func (h *Handlers) ImportGrok(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	inputs := make([]storage.CreateCredentialInput, 0, len(imported))
-	for _, ic := range imported {
-		name := ic.Email
-		if name == "" {
-			name = ic.SourceKey
-		}
-		inputs = append(inputs, storage.CreateCredentialInput{
-			Name: name, Email: ic.Email, UserID: ic.UserID, TeamID: ic.TeamID,
-			SourceKey: ic.SourceKey, OIDCClientID: ic.OIDCClientID,
-			AccessToken: ic.AccessToken, RefreshToken: ic.RefreshToken, ExpiresAt: ic.ExpiresAt,
-		})
+	if queryBool(r, "async") {
+		job := h.startImportJob(imported)
+		writeJSON(w, http.StatusAccepted, map[string]any{"job": job})
+		return
 	}
-
-	results := make([]map[string]any, 0, min(len(imported), 100))
-	createdCount := 0
-	updatedCount := 0
-	failedCount := 0
-	if bulk, ok := h.Store.(credentialBulkUpserter); ok {
-		bulkResults, bulkErr := bulk.BulkUpsertCredentials(inputs)
-		if bulkErr != nil {
-			writeErr(w, http.StatusInternalServerError, bulkErr.Error())
-			return
-		}
-		for i, result := range bulkResults {
-			if result.Err != nil {
-				failedCount++
-				if len(results) < 100 {
-					results = append(results, map[string]any{"source_key": imported[i].SourceKey, "status": "failed", "error": result.Err.Error()})
-				}
-				continue
-			}
-			if result.Created {
-				createdCount++
-			} else {
-				updatedCount++
-			}
-			if len(results) < 100 {
-				resultStatus := "updated"
-				if result.Created {
-					resultStatus = "created"
-				}
-				results = append(results, map[string]any{"source_key": imported[i].SourceKey, "status": resultStatus, "id": result.Credential.ID})
-			}
-		}
-	} else {
-		upserter, canUpsert := h.Store.(credentialUpserter)
-		for i, input := range inputs {
-			var c storage.Credential
-			var wasCreated bool
-			var cerr error
-			if canUpsert {
-				c, wasCreated, cerr = upserter.UpsertCredential(input)
-			} else {
-				c, cerr = h.Store.CreateCredential(input)
-				wasCreated = cerr == nil
-			}
-			if cerr != nil {
-				failedCount++
-				if len(results) < 100 {
-					results = append(results, map[string]any{"source_key": imported[i].SourceKey, "status": "failed", "error": cerr.Error()})
-				}
-				continue
-			}
-			if wasCreated {
-				createdCount++
-			} else {
-				updatedCount++
-			}
-			if len(results) < 100 {
-				status := "updated"
-				if wasCreated {
-					status = "created"
-				}
-				results = append(results, map[string]any{"source_key": imported[i].SourceKey, "status": status, "id": c.ID})
-			}
-		}
+	outcome, persistErr := h.persistImported(imported)
+	if persistErr != nil {
+		writeErr(w, http.StatusInternalServerError, persistErr.Error())
+		return
 	}
-	status := http.StatusOK
-	if createdCount > 0 {
-		status = http.StatusCreated
-	}
-	if failedCount > 0 {
-		status = http.StatusMultiStatus
-	}
-	writeJSON(w, status, map[string]any{
-		"imported":          createdCount + updatedCount,
-		"created":           createdCount,
-		"updated":           updatedCount,
-		"failed":            failedCount,
-		"results":           results,
-		"results_truncated": len(imported) > len(results),
-	})
+	writeJSON(w, outcome.httpStatus(), outcome)
 }
 
 func readMultipartJSONFile(w http.ResponseWriter, r *http.Request, max int64) (json.RawMessage, error) {
@@ -592,7 +564,7 @@ func (h *Handlers) System(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusInternalServerError, "credential store unavailable")
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{
+	response := map[string]any{
 		"version": h.version(),
 		"listen":  h.Config.Listen,
 		"upstream": map[string]any{
@@ -609,7 +581,26 @@ func (h *Handlers) System(w http.ResponseWriter, r *http.Request) {
 		},
 		"limits": h.Config.Limits,
 		"pool":   summarizePool(credentials, time.Now()),
-	})
+	}
+	if provider, ok := h.Store.(storageStatsProvider); ok {
+		response["storage"] = provider.Stats()
+	}
+	writeJSON(w, http.StatusOK, response)
+}
+
+// CreateBackup POST /admin/system/backup creates a verified online snapshot.
+func (h *Handlers) CreateBackup(w http.ResponseWriter, r *http.Request) {
+	creator, ok := h.Store.(backupCreator)
+	if !ok {
+		writeErr(w, http.StatusNotImplemented, "backup unavailable")
+		return
+	}
+	backup, err := creator.CreateBackup()
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusCreated, map[string]any{"backup": backup})
 }
 
 func queryInt(r *http.Request, key string, fallback, minimum, maximum int) int {

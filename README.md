@@ -214,7 +214,7 @@ curl http://127.0.0.1:8080/metrics
 - `top_k` 和 `stop_sequences` 不会转发给 Grok Reasoning 模型。
 - Anthropic Server Tool 的富结果与 Citation UI 尚未完整复刻。
 - 目前只有 Server Web Search 做了专门映射。
-- OAuth 刷新由请求触发，尚无后台预刷新调度器。
+- 冷账号 OAuth 刷新按请求触发，近期活跃账号由受控后台 worker 预刷新。
 - 上游 CLI 协议并不稳定，可能随时变化。
 - 项目面向可信单一操作者，不是多租户 SaaS。
 
@@ -226,6 +226,7 @@ curl http://127.0.0.1:8080/metrics
 - [设计文档](DESIGN.md)
 - [兼容性矩阵](COMPATIBILITY.md)
 - [运维指南](docs/operations.md)
+- [Zeabur 部署](docs/zeabur.md)
 - [安全策略](SECURITY.md)
 - [免责声明](DISCLAIMER.md)
 - [贡献指南](CONTRIBUTING.md)

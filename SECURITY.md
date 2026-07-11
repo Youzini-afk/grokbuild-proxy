@@ -29,8 +29,15 @@ otherwise trusted network. It is not a multi-tenant security boundary.
 
 - Keep the listener on `127.0.0.1` unless `allow_public_listen` is explicitly
   enabled and a trusted TLS/authenticating reverse proxy protects it.
-- Treat `data/credentials.json`, `data/meta.json`, `config.yaml`, admin keys,
-  client keys, and browser admin sessions as secrets.
+- Treat `data/grokbuild.db`, backups, legacy JSON snapshots, `config.yaml`,
+  admin keys, client keys, and browser admin sessions as secrets.
+- Set `CREDENTIAL_ENCRYPTION_KEY` to a stable 32-byte key (64 hex characters
+  are recommended) to encrypt OAuth access/refresh tokens at rest. Losing or
+  changing this key makes encrypted credentials unreadable; back it up outside
+  the mounted volume.
+- Legacy JSON files are intentionally retained after the first SQLite migration
+  for rollback and still contain plaintext tokens. After verifying a database
+  backup and export, archive or securely remove them according to your policy.
 - Treat Anthropic thinking signatures and Grok encrypted reasoning as opaque,
   prompt-equivalent secrets. Do not log or modify them, and replay them only
   through the same trusted proxy/model/account context.

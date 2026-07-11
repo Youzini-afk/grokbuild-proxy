@@ -684,6 +684,85 @@ func TestRecordCredentialUsageFlushesOnClose(t *testing.T) {
 	}
 }
 
+func TestCredentialEncryptionAtRestAndWrongKeyFails(t *testing.T) {
+	dir := t.TempDir()
+	key := strings.Repeat("ab", 32)
+	s, err := NewWithOptions(dir, Options{EncryptionKey: key})
+	if err != nil {
+		t.Fatal(err)
+	}
+	credential, err := s.CreateCredential(CreateCredentialInput{
+		AccessToken: "plaintext-access-secret", RefreshToken: "plaintext-refresh-secret", UserID: "encrypted-user",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	loaded, err := s.GetCredential(credential.ID)
+	if err != nil || loaded.AccessToken != "plaintext-access-secret" || loaded.RefreshToken != "plaintext-refresh-secret" {
+		t.Fatalf("loaded=%+v err=%v", loaded, err)
+	}
+	if err := s.Close(); err != nil {
+		t.Fatal(err)
+	}
+	for _, suffix := range []string{"", "-wal"} {
+		raw, readErr := os.ReadFile(filepath.Join(dir, databaseFile) + suffix)
+		if readErr == nil && (strings.Contains(string(raw), "plaintext-access-secret") || strings.Contains(string(raw), "plaintext-refresh-secret")) {
+			t.Fatalf("plaintext token leaked into database%s", suffix)
+		}
+	}
+	if _, err := NewWithOptions(dir, Options{EncryptionKey: strings.Repeat("cd", 32)}); err == nil {
+		t.Fatal("wrong encryption key must fail")
+	}
+	if _, err := NewWithOptions(dir, Options{}); err == nil {
+		t.Fatal("missing encryption key must fail for encrypted credentials")
+	}
+	s, err = NewWithOptions(dir, Options{EncryptionKey: key})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	loaded, err = s.GetCredential(credential.ID)
+	if err != nil || loaded.RefreshToken != "plaintext-refresh-secret" {
+		t.Fatalf("reopened=%+v err=%v", loaded, err)
+	}
+}
+
+func TestBackupVerifyAndRestore(t *testing.T) {
+	dir := t.TempDir()
+	s, err := New(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.CreateCredential(CreateCredentialInput{UserID: "before-backup", AccessToken: "a", RefreshToken: "r"}); err != nil {
+		t.Fatal(err)
+	}
+	backup, err := s.CreateBackup()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := VerifyBackup(backup.Path); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.CreateCredential(CreateCredentialInput{UserID: "after-backup", AccessToken: "a2", RefreshToken: "r2"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := RestoreDatabase(dir, backup.Path); err != nil {
+		t.Fatal(err)
+	}
+	s, err = New(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	credentials, err := s.ListCredentials()
+	if err != nil || len(credentials) != 1 || credentials[0].UserID != "before-backup" {
+		t.Fatalf("restored credentials=%+v err=%v", credentials, err)
+	}
+}
+
 func TestNewRejectsDangerousDataDirs(t *testing.T) {
 	if _, err := New(string(filepath.Separator)); err == nil {
 		t.Fatal("filesystem root must be rejected")

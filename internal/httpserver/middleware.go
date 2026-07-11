@@ -27,6 +27,7 @@ type Middleware struct {
 	MaxBody  int64
 	// MaxConcurrent limits in-flight authenticated API requests. Zero disables.
 	MaxConcurrent int
+	QueueWait     time.Duration
 	// RequestTimeout bounds the complete request, including upstream streaming.
 	RequestTimeout time.Duration
 	Logger         *slog.Logger
@@ -128,6 +129,12 @@ func (m *Middleware) LimitConcurrency(next http.Handler) http.Handler {
 			next.ServeHTTP(w, r)
 			return
 		}
+		wait := m.QueueWait
+		if wait <= 0 {
+			wait = time.Nanosecond
+		}
+		timer := time.NewTimer(wait)
+		defer timer.Stop()
 		select {
 		case m.sem <- struct{}{}:
 			m.inflight.Add(1)
@@ -136,9 +143,11 @@ func (m *Middleware) LimitConcurrency(next http.Handler) http.Handler {
 				m.inflight.Add(-1)
 			}()
 			next.ServeHTTP(w, r)
-		default:
+		case <-timer.C:
 			w.Header().Set("Retry-After", "1")
 			writeRouteError(w, r, http.StatusServiceUnavailable, "too many concurrent requests")
+		case <-r.Context().Done():
+			writeRouteError(w, r, http.StatusRequestTimeout, "request cancelled while queued")
 		}
 	})
 }

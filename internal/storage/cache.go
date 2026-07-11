@@ -3,14 +3,41 @@ package storage
 import (
 	"context"
 	"fmt"
+	"os"
+	"path/filepath"
 	"sort"
 	"time"
 )
 
 const runtimeFlushInterval = 30 * time.Second
 
+type Stats struct {
+	Backend            string `json:"backend"`
+	Credentials        int    `json:"credentials"`
+	Clients            int    `json:"clients"`
+	PendingUsageWrites int    `json:"pending_usage_writes"`
+	DatabaseBytes      int64  `json:"database_bytes"`
+	EncryptionEnabled  bool   `json:"encryption_enabled"`
+}
+
+func (s *Store) Stats() Stats {
+	if s == nil {
+		return Stats{}
+	}
+	s.cacheMu.RLock()
+	stats := Stats{Backend: "sqlite-wal", Credentials: len(s.credentialCache), Clients: len(s.clientCache), EncryptionEnabled: s.cipher != nil}
+	s.cacheMu.RUnlock()
+	s.runtimeMu.Lock()
+	stats.PendingUsageWrites = len(s.pendingUsage)
+	s.runtimeMu.Unlock()
+	if info, err := os.Stat(filepath.Join(s.dir, databaseFile)); err == nil {
+		stats.DatabaseBytes = info.Size()
+	}
+	return stats
+}
+
 func (s *Store) reloadCaches() error {
-	credentials, err := listCredentialsQuery(s.db, `SELECT `+credentialColumns+` FROM credentials ORDER BY priority DESC,id`)
+	credentials, err := s.listCredentialsQuery(s.db, `SELECT `+credentialColumns+` FROM credentials ORDER BY priority DESC,id`)
 	if err != nil {
 		return fmt.Errorf("storage: load credential cache: %w", err)
 	}

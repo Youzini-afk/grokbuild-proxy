@@ -33,9 +33,20 @@ func main() {
 	configPath := flag.String("config", "", "path to config.yaml (defaults to config.yaml/config.example.yaml when present)")
 	showVersion := flag.Bool("version", false, "print version and exit")
 	printKeys := flag.Bool("print-keys", false, "print resolved API/admin keys and exit (handle output as secret)")
+	createBackup := flag.Bool("backup", false, "create a verified online database backup and exit")
+	verifyBackup := flag.String("verify-backup", "", "verify a database backup and exit")
+	restoreBackup := flag.String("restore-backup", "", "restore a verified database backup and exit (service must be stopped)")
 	flag.Parse()
 	if *showVersion {
 		fmt.Println(version)
+		return
+	}
+	if strings.TrimSpace(*verifyBackup) != "" {
+		info, err := storage.VerifyBackup(*verifyBackup)
+		if err != nil {
+			fail(logger, "backup_verify_failed", err)
+		}
+		fmt.Printf("verified=%s sha256=%s size=%d\n", info.Path, info.SHA256, info.Size)
 		return
 	}
 
@@ -58,12 +69,27 @@ func main() {
 	if err := cfg.ValidateListen(cfg.Listen); err != nil {
 		fail(logger, "listen_invalid", err)
 	}
+	if strings.TrimSpace(*restoreBackup) != "" {
+		if err := storage.RestoreDatabase(cfg.DataDir, *restoreBackup); err != nil {
+			fail(logger, "backup_restore_failed", err)
+		}
+		fmt.Printf("restored=%s data_dir=%s\n", *restoreBackup, cfg.DataDir)
+		return
+	}
 
 	store, err := storage.New(cfg.DataDir)
 	if err != nil {
 		fail(logger, "storage_open_failed", err)
 	}
 	defer store.Close()
+	if *createBackup {
+		info, err := store.CreateBackup()
+		if err != nil {
+			fail(logger, "backup_create_failed", err)
+		}
+		fmt.Printf("backup=%s sha256=%s size=%d\n", info.Path, info.SHA256, info.Size)
+		return
+	}
 
 	apiKey, adminKey, genAPI, genAdmin, err := store.EnsureBootstrapKeys(cfg.APIKey, cfg.AdminKey)
 	if err != nil {
@@ -108,6 +134,7 @@ func main() {
 
 	selector := lb.New(cfg.LB).SetHealthStore(store)
 
+	metrics := &httpserver.Metrics{}
 	exec := &proxy.Executor{
 		Store:     store,
 		Selector:  selector,
@@ -115,6 +142,7 @@ func main() {
 		Refresher: refresher,
 		Logger:    logger,
 		RequestID: httpserver.RequestIDFromContext,
+		Observer:  metrics,
 	}
 	schedulerCtx, stopScheduler := context.WithCancel(context.Background())
 	defer stopScheduler()
@@ -160,6 +188,7 @@ func main() {
 		ModelList: exec,
 		Version:   version,
 		Logger:    logger,
+		Metrics:   metrics,
 	})
 
 	addr := cfg.Listen

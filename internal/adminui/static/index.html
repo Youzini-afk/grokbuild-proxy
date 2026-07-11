@@ -55,10 +55,18 @@
               <p class="muted">Grok 授权账号池 · 启停 / 优先级 / 刷新令牌 / 账单</p>
             </div>
             <div class="row gap">
+              <input id="cred-search" type="search" placeholder="搜索账号/邮箱/ID" />
+              <select id="cred-status-filter">
+                <option value="">全部状态</option>
+                <option value="available">可用</option>
+                <option value="cooling">冷却中</option>
+                <option value="disabled">已禁用</option>
+              </select>
               <button type="button" class="btn" id="btn-cred-refresh-list">刷新列表</button>
               <button type="button" class="btn btn-primary" id="btn-device-login">浏览器登录</button>
               <button type="button" class="btn btn-primary" id="btn-import-default">导入本机 ~/.grok</button>
               <button type="button" class="btn" id="btn-import-file">JSON 文件导入</button>
+              <button type="button" class="btn" id="btn-export-credentials">导出凭证</button>
               <button type="button" class="btn" id="btn-import-raw">粘贴 JSON 导入</button>
               <input id="import-file-input" class="hidden" type="file" accept=".json,application/json" />
             </div>
@@ -99,7 +107,10 @@
               <h2>系统信息</h2>
               <p class="muted">进程配置与上游摘要</p>
             </div>
-            <button type="button" class="btn" id="btn-system-refresh">刷新</button>
+            <div class="row gap">
+              <button type="button" class="btn" id="btn-system-backup">立即备份</button>
+              <button type="button" class="btn" id="btn-system-refresh">刷新</button>
+            </div>
           </div>
           <div id="system-body" class="card stack"></div>
         </section>

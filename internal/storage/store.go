@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"sync"
 	"time"
 )
@@ -24,8 +25,9 @@ const (
 
 // Store is a mutex + lifetime-lock protected SQLite store under DataDir.
 type Store struct {
-	dir string
-	db  *sql.DB
+	dir    string
+	db     *sql.DB
+	cipher *tokenCipher
 
 	mu   sync.Mutex
 	lock *os.File
@@ -43,8 +45,19 @@ type Store struct {
 	runtimeDone  chan struct{}
 }
 
-// New creates a Store rooted at dir. The directory is created with mode 0700.
+// Options configures durable storage security.
+type Options struct {
+	// EncryptionKey is a 64-character hex or base64-encoded 32-byte AES key.
+	EncryptionKey string
+}
+
+// New creates a Store using CREDENTIAL_ENCRYPTION_KEY when present.
 func New(dir string) (*Store, error) {
+	return NewWithOptions(dir, Options{EncryptionKey: strings.TrimSpace(os.Getenv("CREDENTIAL_ENCRYPTION_KEY"))})
+}
+
+// NewWithOptions creates a Store rooted at dir. The directory is created with mode 0700.
+func NewWithOptions(dir string, options Options) (*Store, error) {
 	dir = filepath.Clean(dir)
 	if dir == "" || dir == "." {
 		return nil, fmt.Errorf("storage: data dir is empty")
@@ -84,7 +97,13 @@ func New(dir string) (*Store, error) {
 		}
 		return nil, fmt.Errorf("storage: lock data dir: %w", err)
 	}
-	store := &Store{dir: abs, lock: instanceLock}
+	cipher, err := newTokenCipher(options.EncryptionKey)
+	if err != nil {
+		_ = unlockFile(instanceLock)
+		_ = instanceLock.Close()
+		return nil, err
+	}
+	store := &Store{dir: abs, lock: instanceLock, cipher: cipher}
 	if err := store.openSQLite(); err != nil {
 		_ = unlockFile(instanceLock)
 		_ = instanceLock.Close()

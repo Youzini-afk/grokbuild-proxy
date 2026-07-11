@@ -15,6 +15,7 @@ services:
       DATA_DIR: "/app/data"
       API_KEY: "${API_KEY:-}"
       ADMIN_KEY: "${ADMIN_KEY:-}"
+      CREDENTIAL_ENCRYPTION_KEY: "${CREDENTIAL_ENCRYPTION_KEY:-}"
     # Prefer binding only to loopback on the host (see ports above).
     # Do not expose this proxy to untrusted networks.
 

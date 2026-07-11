@@ -53,7 +53,57 @@ func (s *Store) openSQLite() error {
 		_ = db.Close()
 		return err
 	}
+	if err := s.normalizeCredentialEncryption(); err != nil {
+		s.db = nil
+		_ = db.Close()
+		return err
+	}
 	secureSQLiteFiles(path)
+	return nil
+}
+
+func (s *Store) normalizeCredentialEncryption() error {
+	rawCredentials, err := listCredentialsQueryRaw(s.db, `SELECT `+credentialColumns+` FROM credentials`)
+	if err != nil {
+		return err
+	}
+	needsRewrite := false
+	plainCredentials := make([]Credential, len(rawCredentials))
+	for i, raw := range rawCredentials {
+		plain, err := s.decryptCredential(raw)
+		if err != nil {
+			return err
+		}
+		plainCredentials[i] = plain
+		if s.cipher != nil && ((raw.AccessToken != "" && !strings.HasPrefix(raw.AccessToken, encryptedTokenPrefix)) ||
+			(raw.RefreshToken != "" && !strings.HasPrefix(raw.RefreshToken, encryptedTokenPrefix))) {
+			needsRewrite = true
+		}
+	}
+	if !needsRewrite {
+		return nil
+	}
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback() //nolint:errcheck
+	for _, credential := range plainCredentials {
+		if err := s.putCredentialTx(tx, credential); err != nil {
+			return err
+		}
+	}
+	if _, err := tx.Exec(`INSERT INTO schema_meta(key,value) VALUES('credential_encryption','aes-256-gcm-v1')
+		ON CONFLICT(key) DO UPDATE SET value=excluded.value`); err != nil {
+		return err
+	}
+	if err := tx.Commit(); err != nil {
+		return err
+	}
+	_, _ = s.db.Exec(`PRAGMA wal_checkpoint(TRUNCATE)`)
+	if _, err := s.db.Exec(`VACUUM`); err != nil {
+		return fmt.Errorf("storage: compact after credential encryption: %w", err)
+	}
 	return nil
 }
 
@@ -138,7 +188,7 @@ func (s *Store) migrateJSONToSQLite() error {
 		if credential.UpdatedAt.IsZero() {
 			credential.UpdatedAt = credential.CreatedAt
 		}
-		if err := putCredentialTx(tx, credential); err != nil {
+		if err := s.putCredentialTx(tx, credential); err != nil {
 			return fmt.Errorf("storage: migrate credential %s: %w", credential.ID, err)
 		}
 	}
@@ -255,7 +305,7 @@ func (s *Store) dbCreateCredential(in CreateCredentialInput) (Credential, error)
 		}
 		created = Credential{ID: id, Enabled: enabled, Priority: priority, CreatedAt: now, UpdatedAt: now}
 		applyCredentialInput(&created, in)
-		if err := putCredentialDB(s.db, created); err != nil {
+		if err := s.putCredentialDB(created); err != nil {
 			return err
 		}
 		s.cacheCredential(created)
@@ -272,7 +322,7 @@ func (s *Store) dbBulkUpsertCredentials(inputs []CreateCredentialInput) ([]BulkU
 			return err
 		}
 		defer tx.Rollback() //nolint:errcheck
-		credentials, err := listCredentialsQuery(tx, `SELECT `+credentialColumns+` FROM credentials`)
+		credentials, err := s.listCredentialsQuery(tx, `SELECT `+credentialColumns+` FROM credentials`)
 		if err != nil {
 			return err
 		}
@@ -287,7 +337,7 @@ func (s *Store) dbBulkUpsertCredentials(inputs []CreateCredentialInput) ([]BulkU
 				credential := credentials[existing]
 				applyCredentialInput(&credential, in)
 				credential.UpdatedAt = now
-				if err := putCredentialTx(tx, credential); err != nil {
+				if err := s.putCredentialTx(tx, credential); err != nil {
 					return err
 				}
 				credentials[existing] = credential
@@ -308,7 +358,7 @@ func (s *Store) dbBulkUpsertCredentials(inputs []CreateCredentialInput) ([]BulkU
 			}
 			credential := Credential{ID: id, Enabled: enabled, Priority: priority, CreatedAt: now, UpdatedAt: now}
 			applyCredentialInput(&credential, in)
-			if err := putCredentialTx(tx, credential); err != nil {
+			if err := s.putCredentialTx(tx, credential); err != nil {
 				return err
 			}
 			credentials = append(credentials, credential)
@@ -336,7 +386,7 @@ func (s *Store) dbUpdateCredential(c Credential) (Credential, error) {
 		}
 		c.CreatedAt = current.CreatedAt
 		c.UpdatedAt = nowUTC()
-		if err := putCredentialDB(s.db, c); err != nil {
+		if err := s.putCredentialDB(c); err != nil {
 			return err
 		}
 		s.cacheCredential(c)
@@ -361,7 +411,7 @@ func (s *Store) dbPatchCredential(id string, mutate func(*Credential) error) (Cr
 		}
 		current.ID = id
 		current.UpdatedAt = nowUTC()
-		if err := putCredentialDB(s.db, current); err != nil {
+		if err := s.putCredentialDB(current); err != nil {
 			return err
 		}
 		s.cacheCredential(current)
@@ -391,7 +441,7 @@ type credentialQueryer interface {
 	Query(string, ...any) (*sql.Rows, error)
 }
 
-func listCredentialsQuery(queryer credentialQueryer, query string, args ...any) ([]Credential, error) {
+func listCredentialsQueryRaw(queryer credentialQueryer, query string, args ...any) ([]Credential, error) {
 	rows, err := queryer.Query(query, args...)
 	if err != nil {
 		return nil, err
@@ -406,6 +456,14 @@ func listCredentialsQuery(queryer credentialQueryer, query string, args ...any) 
 		out = append(out, credential)
 	}
 	return out, rows.Err()
+}
+
+func (s *Store) listCredentialsQuery(queryer credentialQueryer, query string, args ...any) ([]Credential, error) {
+	credentials, err := listCredentialsQueryRaw(queryer, query, args...)
+	if err != nil {
+		return nil, err
+	}
+	return s.decryptCredentials(credentials)
 }
 
 func scanCredential(scanner credentialScanner) (Credential, error) {
@@ -431,13 +489,21 @@ func scanCredential(scanner credentialScanner) (Credential, error) {
 	return c, nil
 }
 
-func putCredentialDB(db *sql.DB, c Credential) error {
-	_, err := db.Exec(putCredentialSQL(), credentialArgs(c)...)
+func (s *Store) putCredentialDB(c Credential) error {
+	encrypted, err := s.encryptCredential(c)
+	if err != nil {
+		return err
+	}
+	_, err = s.db.Exec(putCredentialSQL(), credentialArgs(encrypted, tokenFingerprint(c.RefreshToken))...)
 	return err
 }
 
-func putCredentialTx(tx *sql.Tx, c Credential) error {
-	_, err := tx.Exec(putCredentialSQL(), credentialArgs(c)...)
+func (s *Store) putCredentialTx(tx *sql.Tx, c Credential) error {
+	encrypted, err := s.encryptCredential(c)
+	if err != nil {
+		return err
+	}
+	_, err = tx.Exec(putCredentialSQL(), credentialArgs(encrypted, tokenFingerprint(c.RefreshToken))...)
 	return err
 }
 
@@ -452,7 +518,7 @@ func putCredentialSQL() string {
 	last_success_at=excluded.last_success_at,billing=excluded.billing,updated_at=excluded.updated_at`
 }
 
-func credentialArgs(c Credential) []any {
+func credentialArgs(c Credential, refreshFingerprint string) []any {
 	billing := ""
 	if len(c.Billing) > 0 {
 		if raw, err := json.Marshal(c.Billing); err == nil {
@@ -460,7 +526,7 @@ func credentialArgs(c Credential) []any {
 		}
 	}
 	return []any{c.ID, c.Name, c.Email, c.UserID, c.TeamID, c.SourceKey, c.OIDCClientID,
-		c.AccessToken, c.RefreshToken, tokenFingerprint(c.RefreshToken), formatDBTime(c.ExpiresAt), boolInt(c.Enabled), c.Priority,
+		c.AccessToken, c.RefreshToken, refreshFingerprint, formatDBTime(c.ExpiresAt), boolInt(c.Enabled), c.Priority,
 		c.FailureCount, formatDBTimePointer(c.CooldownUntil), c.LastError, formatDBTimePointer(c.LastUsedAt),
 		formatDBTimePointer(c.LastSuccessAt), billing, formatDBTime(c.CreatedAt), formatDBTime(c.UpdatedAt)}
 }

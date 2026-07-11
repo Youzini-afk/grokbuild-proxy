@@ -79,6 +79,13 @@ type credentialCachePruner interface {
 	PruneCredentials(keep map[string]struct{})
 }
 
+// Observer receives low-cardinality data-plane events.
+type Observer interface {
+	ObserveCredentialPick(failover bool)
+	ObserveCredentialFailure()
+	ObserveRegionalModelError()
+}
+
 // Executor selects credentials, refreshes tokens, and posts to upstream /v1/responses.
 type Executor struct {
 	Store     Store
@@ -93,6 +100,7 @@ type Executor struct {
 	Logger *slog.Logger
 	// RequestID extracts a correlation ID from ctx.
 	RequestID func(context.Context) string
+	Observer  Observer
 
 	usageMu         sync.Mutex
 	lastUsed        map[string]time.Time
@@ -143,6 +151,9 @@ func (e *Executor) Post(ctx context.Context, model, convID string, body []byte, 
 			return nil, err
 		}
 		tried[cred.ID] = struct{}{}
+		if e.Observer != nil {
+			e.Observer.ObserveCredentialPick(attempt > 0)
+		}
 		e.log(ctx, slog.LevelDebug, "credential_selected",
 			"credential_id", cred.ID,
 			"attempt", attempt+1,
@@ -250,6 +261,9 @@ func (e *Executor) Post(ctx context.Context, model, convID string, body []byte, 
 			status := retry.StatusCode
 			lastResp = bufferErrorResponse(retry)
 			if isRegionalModelUnavailable(lastResp) {
+				if e.Observer != nil {
+					e.Observer.ObserveRegionalModelError()
+				}
 				return lastResp, nil
 			}
 			e.markFailure(cred.ID, model, status, ra, e.now())
@@ -269,6 +283,9 @@ func (e *Executor) Post(ctx context.Context, model, convID string, body []byte, 
 			status := resp.StatusCode
 			lastResp = bufferErrorResponse(resp)
 			if isRegionalModelUnavailable(lastResp) {
+				if e.Observer != nil {
+					e.Observer.ObserveRegionalModelError()
+				}
 				return lastResp, nil
 			}
 			e.markFailure(cred.ID, model, status, ra, e.now())
@@ -510,6 +527,9 @@ func (e *Executor) pruneCredentialCaches(version uint64, credentials []storage.C
 }
 
 func (e *Executor) markFailure(credID, model string, status int, retryAfter time.Duration, now time.Time) {
+	if e.Observer != nil {
+		e.Observer.ObserveCredentialFailure()
+	}
 	if status == http.StatusForbidden {
 		if selector, ok := e.Selector.(modelAwareSelector); ok {
 			selector.MarkModelFailure(credID, model, status, retryAfter, now)
