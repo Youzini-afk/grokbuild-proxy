@@ -58,12 +58,14 @@
               <button type="button" class="btn" id="btn-cred-refresh-list">刷新列表</button>
               <button type="button" class="btn btn-primary" id="btn-device-login">浏览器登录</button>
               <button type="button" class="btn btn-primary" id="btn-import-default">导入本机 ~/.grok</button>
+              <button type="button" class="btn" id="btn-import-file">JSON 文件导入</button>
               <button type="button" class="btn" id="btn-import-raw">粘贴 JSON 导入</button>
+              <input id="import-file-input" class="hidden" type="file" accept=".json,application/json" />
             </div>
           </div>
           <div id="cred-empty" class="empty card hidden">
             <h3>暂无凭证</h3>
-            <p class="muted">可从本机默认路径导入，或粘贴 Grok 授权 JSON 文件内容。</p>
+            <p class="muted">可从本机默认路径导入，或上传 Grok 授权 JSON 文件。</p>
           </div>
           <div id="cred-list" class="card-grid"></div>
         </section>

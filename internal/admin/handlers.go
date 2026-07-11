@@ -248,10 +248,19 @@ func (h *Handlers) ImportGrok(w http.ResponseWriter, r *http.Request) {
 		Path string          `json:"path"`
 		Raw  json.RawMessage `json:"raw"`
 	}
-	// Body is optional; empty body → default path. Malformed JSON is 400 (not silent fallback).
-	if err := decodeJSON(r, h.maxBody(), &body); err != nil {
-		writeErr(w, http.StatusBadRequest, err.Error())
-		return
+	if strings.HasPrefix(strings.ToLower(strings.TrimSpace(r.Header.Get("Content-Type"))), "multipart/form-data") {
+		raw, err := readMultipartJSONFile(w, r, h.maxBody())
+		if err != nil {
+			writeErr(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		body.Raw = raw
+	} else {
+		// Body is optional; empty body → default path. Malformed JSON is 400 (not silent fallback).
+		if err := decodeJSON(r, h.maxBody(), &body); err != nil {
+			writeErr(w, http.StatusBadRequest, err.Error())
+			return
+		}
 	}
 
 	var imported []auth.ImportedCredential
@@ -342,6 +351,54 @@ func (h *Handlers) ImportGrok(w http.ResponseWriter, r *http.Request) {
 		"results":     results,
 		"credentials": credentials,
 	})
+}
+
+func readMultipartJSONFile(w http.ResponseWriter, r *http.Request, max int64) (json.RawMessage, error) {
+	if r == nil || r.Body == nil {
+		return nil, fmt.Errorf("missing body")
+	}
+	if max <= 0 {
+		return nil, fmt.Errorf("invalid upload limit")
+	}
+	r.Body = http.MaxBytesReader(w, r.Body, max+(1<<20))
+	reader, err := r.MultipartReader()
+	if err != nil {
+		return nil, fmt.Errorf("invalid multipart upload: %w", err)
+	}
+	for {
+		part, nextErr := reader.NextPart()
+		if nextErr == io.EOF {
+			break
+		}
+		if nextErr != nil {
+			return nil, fmt.Errorf("invalid multipart upload: %w", nextErr)
+		}
+		if part.FormName() != "file" {
+			_ = part.Close()
+			continue
+		}
+		name := strings.TrimSpace(part.FileName())
+		if name == "" || !strings.HasSuffix(strings.ToLower(name), ".json") {
+			_ = part.Close()
+			return nil, fmt.Errorf("uploaded file must be a .json file")
+		}
+		raw, readErr := io.ReadAll(io.LimitReader(part, max+1))
+		_ = part.Close()
+		if readErr != nil {
+			return nil, fmt.Errorf("read uploaded file: %w", readErr)
+		}
+		if int64(len(raw)) > max {
+			return nil, fmt.Errorf("uploaded file too large")
+		}
+		if len(strings.TrimSpace(string(raw))) == 0 {
+			return nil, fmt.Errorf("uploaded file is empty")
+		}
+		if !json.Valid(raw) {
+			return nil, fmt.Errorf("uploaded file contains invalid json")
+		}
+		return json.RawMessage(raw), nil
+	}
+	return nil, fmt.Errorf("multipart upload is missing file field")
 }
 
 // DisableCredential POST /admin/credentials/{id}/disable

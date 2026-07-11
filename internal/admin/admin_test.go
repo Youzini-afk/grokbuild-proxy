@@ -1,10 +1,12 @@
 package admin
 
 import (
+	"bytes"
 	"context"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -276,6 +278,72 @@ func TestImportGrokIsIdempotent(t *testing.T) {
 	}
 	if response["updated"] != float64(1) || response["created"] != float64(0) {
 		t.Fatalf("response=%v", response)
+	}
+}
+
+func TestImportGrokMultipartJSONFile(t *testing.T) {
+	store, err := storage.New(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	h := &Handlers{Store: store, MaxBody: 1 << 20}
+	raw := `{"accounts":[
+		{"key":"access-one","refresh_token":"refresh-one","user_id":"user-one","email":"one@example.com","oidc_client_id":"client-test"},
+		{"key":"access-two","refresh_token":"refresh-two","user_id":"user-two","email":"two@example.com","oidc_client_id":"client-test"}
+	]}`
+
+	var body bytes.Buffer
+	writer := multipart.NewWriter(&body)
+	part, err := writer.CreateFormFile("file", "grok-accounts.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = part.Write([]byte(raw)); err != nil {
+		t.Fatal(err)
+	}
+	if err = writer.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/admin/credentials/import-grok", &body)
+	req.Header.Set("Content-Type", writer.FormDataContentType())
+	rr := httptest.NewRecorder()
+	h.ImportGrok(rr, req)
+	if rr.Code != http.StatusCreated {
+		t.Fatalf("status=%d body=%s", rr.Code, rr.Body.String())
+	}
+	creds, err := store.ListCredentials()
+	if err != nil || len(creds) != 2 {
+		t.Fatalf("credentials=%d err=%v", len(creds), err)
+	}
+	var response map[string]any
+	if err = json.Unmarshal(rr.Body.Bytes(), &response); err != nil {
+		t.Fatal(err)
+	}
+	if response["imported"] != float64(2) || response["created"] != float64(2) {
+		t.Fatalf("response=%v", response)
+	}
+}
+
+func TestImportGrokMultipartRejectsOversizedFile(t *testing.T) {
+	h := &Handlers{Store: newFakeStore(), MaxBody: 32}
+	var body bytes.Buffer
+	writer := multipart.NewWriter(&body)
+	part, err := writer.CreateFormFile("file", "too-large.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, _ = part.Write([]byte(`{"accounts":[{"key":"more-than-thirty-two-bytes"}]}`))
+	if err = writer.Close(); err != nil {
+		t.Fatal(err)
+	}
+	req := httptest.NewRequest(http.MethodPost, "/admin/credentials/import-grok", &body)
+	req.Header.Set("Content-Type", writer.FormDataContentType())
+	rr := httptest.NewRecorder()
+	h.ImportGrok(rr, req)
+	if rr.Code != http.StatusBadRequest || !strings.Contains(rr.Body.String(), "too large") {
+		t.Fatalf("status=%d body=%s", rr.Code, rr.Body.String())
 	}
 }
 

@@ -142,6 +142,42 @@
     });
   }
 
+  function uploadJSONFile(path, file) {
+    var headers = { Accept: "application/json" };
+    if (state.key) headers.Authorization = "Bearer " + state.key;
+    var form = new FormData();
+    form.append("file", file, file.name);
+    return fetch(API_BASE + path, {
+      method: "POST",
+      headers: headers,
+      body: form,
+    }).then(function (res) {
+      return res.text().then(function (text) {
+        var data = null;
+        if (text) {
+          try {
+            data = JSON.parse(text);
+          } catch (_) {
+            data = { raw: text };
+          }
+        }
+        if (res.status === 401) {
+          logout(true);
+          var err401 = new Error(apiErrorMessage(data, res.status));
+          err401.status = 401;
+          throw err401;
+        }
+        if (!res.ok) {
+          var err = new Error(apiErrorMessage(data, res.status));
+          err.status = res.status;
+          err.data = data;
+          throw err;
+        }
+        return data;
+      });
+    });
+  }
+
   // ---------- Routing ----------
 
   function parseRoute() {
@@ -792,6 +828,31 @@
     openModal("导入 Grok JSON", body, [cancel, ok]);
   }
 
+  function importGrokFile(file) {
+    if (!file) return;
+    if (!/\.json$/i.test(file.name || "")) {
+      toast("请选择 JSON 文件", "err");
+      return;
+    }
+    var button = $("btn-import-file");
+    if (button) button.disabled = true;
+    toast("正在导入 " + file.name + "…", "");
+    uploadJSONFile("/admin/credentials/import-grok", file)
+      .then(function (data) {
+        var n = (data && data.imported) || 0;
+        toast("已导入 " + n + " 条凭证", "ok");
+        loadCredentials();
+      })
+      .catch(function (err) {
+        toast("导入失败: " + err.message, "err");
+      })
+      .finally(function () {
+        if (button) button.disabled = false;
+        var input = $("import-file-input");
+        if (input) input.value = "";
+      });
+  }
+
   // ---------- Clients ----------
 
   function loadClients() {
@@ -1091,6 +1152,17 @@
 
     var impRaw = $("btn-import-raw");
     if (impRaw) impRaw.addEventListener("click", openImportRawModal);
+
+    var impFile = $("btn-import-file");
+    var impFileInput = $("import-file-input");
+    if (impFile && impFileInput) {
+      impFile.addEventListener("click", function () {
+        impFileInput.click();
+      });
+      impFileInput.addEventListener("change", function () {
+        importGrokFile(impFileInput.files && impFileInput.files[0]);
+      });
+    }
 
     var clientRefresh = $("btn-client-refresh");
     if (clientRefresh) clientRefresh.addEventListener("click", loadClients);
