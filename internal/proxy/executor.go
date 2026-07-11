@@ -44,6 +44,10 @@ type credentialUsageRecorder interface {
 	RecordCredentialUsage(id string, usedAt time.Time)
 }
 
+type credentialCallRecorder interface {
+	RecordCredentialCall(event storage.CallEvent)
+}
+
 // Selector is the subset of lb.Selector used by the executor.
 type Selector interface {
 	Pick(creds []storage.Credential, stickyKey string, now time.Time) (storage.Credential, error)
@@ -151,6 +155,7 @@ func (e *Executor) Post(ctx context.Context, model, convID string, body []byte, 
 			return nil, err
 		}
 		tried[cred.ID] = struct{}{}
+		attemptStarted := time.Now()
 		if e.Observer != nil {
 			e.Observer.ObserveCredentialPick(attempt > 0)
 		}
@@ -176,6 +181,7 @@ func (e *Executor) Post(ctx context.Context, model, convID string, body []byte, 
 					continue
 				}
 			}
+			e.recordCredentialCall(cred, model, http.StatusUnauthorized, false, attemptStarted, err)
 			e.markFailure(cred.ID, model, http.StatusUnauthorized, 0, e.now())
 			continue
 		}
@@ -205,12 +211,14 @@ func (e *Executor) Post(ctx context.Context, model, convID string, body []byte, 
 				"attempt", attempt+1,
 				"error", err,
 			)
+			e.recordCredentialCall(cred, model, 0, false, attemptStarted, err)
 			e.markFailure(cred.ID, model, 0, 0, e.now())
 			continue
 		}
 
 		// 426: do not failover; return original response (or typed error if nil).
 		if resp.StatusCode == http.StatusUpgradeRequired {
+			e.recordCredentialCall(cred, model, resp.StatusCode, false, attemptStarted, nil)
 			return resp, nil
 		}
 
@@ -222,6 +230,7 @@ func (e *Executor) Post(ctx context.Context, model, convID string, body []byte, 
 				"upstream_status", resp.StatusCode,
 			)
 			e.markSuccess(cred.ID, model, convID, e.now())
+			e.recordCredentialCall(cred, model, resp.StatusCode, true, attemptStarted, nil)
 			_ = e.touchLastUsed(cred)
 			return resp, nil
 		}
@@ -233,6 +242,7 @@ func (e *Executor) Post(ctx context.Context, model, convID string, body []byte, 
 			if rerr != nil {
 				lastErr = rerr
 				lastResp = unauthorizedResp
+				e.recordCredentialCall(cred, model, http.StatusUnauthorized, false, attemptStarted, rerr)
 				e.markFailure(cred.ID, model, http.StatusUnauthorized, 0, e.now())
 				continue
 			}
@@ -245,21 +255,25 @@ func (e *Executor) Post(ctx context.Context, model, convID string, body []byte, 
 			})
 			if rerr != nil {
 				lastErr = rerr
+				e.recordCredentialCall(cred, model, 0, false, attemptStarted, rerr)
 				e.markFailure(cred.ID, model, http.StatusUnauthorized, 0, e.now())
 				continue
 			}
 			if retry.StatusCode >= 200 && retry.StatusCode < 300 {
 				e.markSuccess(cred.ID, model, convID, e.now())
+				e.recordCredentialCall(cred, model, retry.StatusCode, true, attemptStarted, nil)
 				_ = e.touchLastUsed(cred)
 				return retry, nil
 			}
 			if retry.StatusCode == http.StatusUpgradeRequired {
+				e.recordCredentialCall(cred, model, retry.StatusCode, false, attemptStarted, nil)
 				return retry, nil
 			}
 			// Still failing after refresh → mark and switch credentials.
 			ra := parseRetryAfterAt(retry.Header.Get("Retry-After"), e.now())
 			status := retry.StatusCode
 			lastResp = bufferErrorResponse(retry)
+			e.recordCredentialCall(cred, model, status, false, attemptStarted, nil)
 			if isRegionalModelUnavailable(lastResp) {
 				if e.Observer != nil {
 					e.Observer.ObserveRegionalModelError()
@@ -282,6 +296,7 @@ func (e *Executor) Post(ctx context.Context, model, convID string, body []byte, 
 			ra := parseRetryAfterAt(resp.Header.Get("Retry-After"), e.now())
 			status := resp.StatusCode
 			lastResp = bufferErrorResponse(resp)
+			e.recordCredentialCall(cred, model, status, false, attemptStarted, nil)
 			if isRegionalModelUnavailable(lastResp) {
 				if e.Observer != nil {
 					e.Observer.ObserveRegionalModelError()
@@ -300,6 +315,7 @@ func (e *Executor) Post(ctx context.Context, model, convID string, body []byte, 
 		}
 
 		// Non-retryable error: return as-is for the handler to map.
+		e.recordCredentialCall(cred, model, resp.StatusCode, false, attemptStarted, nil)
 		return resp, nil
 	}
 
@@ -310,6 +326,32 @@ func (e *Executor) Post(ctx context.Context, model, convID string, body []byte, 
 		return nil, lastErr
 	}
 	return nil, lb.ErrNoCredential
+}
+
+func (e *Executor) recordCredentialCall(credential storage.Credential, model string, status int, success bool, started time.Time, callErr error) {
+	recorder, ok := e.Store.(credentialCallRecorder)
+	if !ok {
+		return
+	}
+	latency := time.Since(started)
+	if latency < 0 {
+		latency = 0
+	}
+	errorMessage := ""
+	if callErr != nil {
+		errorMessage = callErr.Error()
+	} else if !success && status > 0 {
+		errorMessage = http.StatusText(status)
+	}
+	recorder.RecordCredentialCall(storage.CallEvent{
+		CredentialID: credential.ID,
+		Model:        model,
+		Status:       status,
+		Success:      success,
+		LatencyMS:    latency.Milliseconds(),
+		Error:        errorMessage,
+		CreatedAt:    time.Now().UTC(),
+	})
 }
 
 // EnsureToken ensures a non-expired access token for the given credential,

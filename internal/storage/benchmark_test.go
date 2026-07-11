@@ -3,6 +3,7 @@ package storage
 import (
 	"fmt"
 	"testing"
+	"time"
 )
 
 func TestBulkUpsertTenThousand(t *testing.T) {
@@ -36,6 +37,16 @@ func BenchmarkBulkUpsert10000(b *testing.B) {
 			b.Fatal(err)
 		}
 		_ = store.Close()
+	}
+}
+
+func BenchmarkRecordCredentialCall(b *testing.B) {
+	store := &Store{usageByCredential: make(map[string]CredentialUsage)}
+	event := CallEvent{CredentialID: "cred-bench", Model: "grok-4.5", Status: 200, Success: true, LatencyMS: 250, CreatedAt: time.Now()}
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		store.RecordCredentialCall(event)
 	}
 }
 

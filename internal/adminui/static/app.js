@@ -13,6 +13,7 @@
     credentialOffset: 0,
     credentialLimit: 100,
     credentialTotal: 0,
+    dashboardLoading: false,
   };
 
   // ---------- DOM helpers (no innerHTML for untrusted data) ----------
@@ -186,12 +187,12 @@
   function parseRoute() {
     var hash = (location.hash || "").replace(/^#\/?/, "");
     var name = (hash.split("?")[0] || "").split("/")[0] || "";
-    if (!name) name = state.key ? "credentials" : "login";
+    if (!name) name = state.key ? "dashboard" : "login";
     return name;
   }
 
   function navigate(route) {
-    if (!route) route = "credentials";
+    if (!route) route = "dashboard";
     location.hash = "#/" + route;
   }
 
@@ -218,18 +219,20 @@
 
     if (route === "login") {
       if (state.key) {
-        navigate("credentials");
+        navigate("dashboard");
       }
       return;
     }
 
     setActiveNav(route);
+    show($("page-dashboard"), route === "dashboard");
     show($("page-credentials"), route === "credentials");
     show($("page-clients"), route === "clients");
     show($("page-system"), route === "system");
     show($("page-integration"), route === "integration");
 
-    if (route === "credentials") loadCredentials();
+    if (route === "dashboard") loadDashboard();
+    else if (route === "credentials") loadCredentials();
     else if (route === "clients") loadClients();
     else if (route === "system") loadSystem();
     else if (route === "integration") renderIntegration();
@@ -264,7 +267,7 @@
         saveKey(key);
         setText($("shell-version"), (sys && sys.version) || "管理后台");
         toast("登录成功", "ok");
-        navigate("credentials");
+        navigate("dashboard");
         render();
       })
       .catch(function (err) {
@@ -294,6 +297,158 @@
     if (!id) return "—";
     if (id.length <= 12) return id;
     return id.slice(0, 6) + "…" + id.slice(-4);
+  }
+
+  function formatNumber(value) {
+    return Number(value || 0).toLocaleString();
+  }
+
+  function formatLatency(value) {
+    var n = Number(value || 0);
+    if (n >= 1000) return (n / 1000).toFixed(n >= 10000 ? 1 : 2) + " s";
+    return Math.round(n) + " ms";
+  }
+
+  // ---------- Dashboard ----------
+
+  function loadDashboard(silent) {
+    if (state.dashboardLoading) return;
+    state.dashboardLoading = true;
+    var hours = Number(($('dashboard-hours') && $('dashboard-hours').value) || 24);
+    api("GET", "/admin/usage/summary?hours=" + hours)
+      .then(function (data) {
+        renderDashboard((data && data.usage) || {});
+        setText($("dashboard-updated"), "更新于 " + new Date().toLocaleTimeString());
+      })
+      .catch(function (err) {
+        if (!silent) toast("加载调用统计失败: " + err.message, "err");
+      })
+      .finally(function () { state.dashboardLoading = false; });
+  }
+
+  function renderDashboard(usage) {
+    var kpis = $("dashboard-kpis");
+    clear(kpis);
+    var total = Number(usage.total_count || 0);
+    var success = Number(usage.success_count || 0);
+    var failure = Number(usage.failure_count || 0);
+    var rate = total ? Number(usage.success_rate || 0).toFixed(2) + "%" : "—";
+    [
+      ["总调用", formatNumber(total), "全部上游尝试", "kpi-primary"],
+      ["成功", formatNumber(success), "正常返回 2xx", "kpi-success"],
+      ["失败", formatNumber(failure), "限流 / 权限 / 上游错误", "kpi-danger"],
+      ["成功率", rate, total ? "失败率 " + (100 - Number(usage.success_rate || 0)).toFixed(2) + "%" : "暂无调用", "kpi-success"],
+      ["平均延迟", formatLatency(usage.average_latency_ms), "凭证选择至上游响应", "kpi-primary"],
+      ["活跃账号", formatNumber(usage.active_accounts), "当前时间窗口内", "kpi-neutral"]
+    ].forEach(function (item) {
+      var card = el("article", "card kpi-card " + item[3]);
+      card.appendChild(el("div", "kpi-label", item[0]));
+      card.appendChild(el("div", "kpi-value", item[1]));
+      card.appendChild(el("div", "muted kpi-detail", item[2]));
+      kpis.appendChild(card);
+    });
+    renderTrend(usage.buckets || []);
+    renderModelUsage(usage.models || []);
+    renderRecentCalls(usage.recent || []);
+  }
+
+  function compactBuckets(buckets, maxBars) {
+    if (buckets.length <= maxBars) return buckets;
+    var size = Math.ceil(buckets.length / maxBars);
+    var out = [];
+    for (var i = 0; i < buckets.length; i += size) {
+      var group = buckets.slice(i, i + size);
+      var merged = { time: group[0].time, success_count: 0, failure_count: 0, total_count: 0 };
+      group.forEach(function (b) {
+        merged.success_count += Number(b.success_count || 0);
+        merged.failure_count += Number(b.failure_count || 0);
+        merged.total_count += Number(b.total_count || 0);
+      });
+      out.push(merged);
+    }
+    return out;
+  }
+
+  function renderTrend(rawBuckets) {
+    var host = $("dashboard-trend");
+    clear(host);
+    var buckets = compactBuckets(rawBuckets, 72);
+    var max = 1;
+    buckets.forEach(function (b) { max = Math.max(max, Number(b.total_count || 0)); });
+    buckets.forEach(function (b) {
+      var total = Number(b.total_count || 0);
+      var success = Number(b.success_count || 0);
+      var failure = Number(b.failure_count || 0);
+      var column = el("div", "trend-column");
+      column.title = fmtTime(b.time) + "\n总计 " + total + " · 成功 " + success + " · 失败 " + failure;
+      var stack = el("div", "trend-stack");
+      stack.style.height = Math.max(total ? 4 : 1, (total / max) * 100) + "%";
+      if (failure) {
+        var fail = el("div", "trend-failure");
+        fail.style.height = (failure / total) * 100 + "%";
+        stack.appendChild(fail);
+      }
+      if (success) {
+        var ok = el("div", "trend-success");
+        ok.style.height = (success / total) * 100 + "%";
+        stack.appendChild(ok);
+      }
+      column.appendChild(stack);
+      host.appendChild(column);
+    });
+  }
+
+  function renderModelUsage(models) {
+    var host = $("dashboard-models");
+    clear(host);
+    if (!models.length) {
+      host.appendChild(el("p", "muted", "暂无模型调用"));
+      return;
+    }
+    var max = Math.max.apply(null, models.map(function (m) { return Number(m.total_count || 0); }));
+    models.forEach(function (model) {
+      var row = el("div", "model-usage-row");
+      var head = el("div", "model-usage-head");
+      head.appendChild(el("code", "", model.model || "unknown"));
+      head.appendChild(el("span", "muted", formatNumber(model.total_count) + " · " + formatLatency(model.average_latency_ms)));
+      row.appendChild(head);
+      var track = el("div", "model-track");
+      var fill = el("div", "model-fill");
+      fill.style.width = (Number(model.total_count || 0) / Math.max(1, max)) * 100 + "%";
+      track.appendChild(fill);
+      row.appendChild(track);
+      host.appendChild(row);
+    });
+  }
+
+  function renderRecentCalls(events) {
+    var host = $("dashboard-recent");
+    clear(host);
+    if (!events.length) {
+      host.appendChild(el("p", "muted dashboard-empty", "暂无调用记录，发起一次模型请求后这里会实时出现。"));
+      return;
+    }
+    var table = el("table", "table usage-table");
+    var thead = el("thead");
+    var hr = el("tr");
+    ["时间", "账号", "模型", "结果", "状态", "延迟"].forEach(function (label) { hr.appendChild(el("th", "", label)); });
+    thead.appendChild(hr);
+    table.appendChild(thead);
+    var tbody = el("tbody");
+    events.forEach(function (event) {
+      var row = el("tr");
+      row.appendChild(el("td", "muted", fmtTime(event.created_at)));
+      row.appendChild(el("td", "", event.credential_name || event.email || shortId(event.credential_id)));
+      row.appendChild(el("td", "", event.model || "—"));
+      var result = el("span", "badge " + (event.success ? "badge-ok" : "badge-danger"), event.success ? "成功" : "失败");
+      var resultCell = el("td"); resultCell.appendChild(result); row.appendChild(resultCell);
+      row.appendChild(el("td", "", event.status ? String(event.status) : "网络"));
+      row.appendChild(el("td", "", formatLatency(event.latency_ms)));
+      if (event.error) row.title = event.error;
+      tbody.appendChild(row);
+    });
+    table.appendChild(tbody);
+    host.appendChild(table);
   }
 
   // ---------- Credentials ----------
@@ -352,6 +507,29 @@
     );
     top.appendChild(badge);
     card.appendChild(top);
+
+    var usage = c.usage || {};
+    var stats = el("div", "credential-stats");
+    stats.appendChild(el("span", "stat-chip stat-success", "成功 " + formatNumber(usage.success_count)));
+    stats.appendChild(el("span", "stat-chip stat-failure", "失败 " + formatNumber(usage.failure_count)));
+    stats.appendChild(el("span", "stat-chip", "平均 " + formatLatency(usage.average_latency_ms)));
+    card.appendChild(stats);
+
+    var timeline = el("div", "call-timeline");
+    var recent = (usage.recent || []).slice();
+    for (var emptyIndex = recent.length; emptyIndex < 24; emptyIndex++) {
+      timeline.appendChild(el("span", "call-dot call-empty"));
+    }
+    recent.forEach(function (event) {
+      var dot = el("span", "call-dot " + (event.success ? "call-success" : "call-failure"));
+      dot.title = fmtTime(event.created_at) + " · " + (event.model || "unknown") + " · " +
+        (event.status || "network") + " · " + formatLatency(event.latency_ms);
+      timeline.appendChild(dot);
+    });
+    card.appendChild(timeline);
+    if (usage.last_called_at) {
+      card.appendChild(el("div", "muted last-call", "最近 " + fmtTime(usage.last_called_at) + " · " + (usage.last_model || "—")));
+    }
 
     var meta = el("div", "cred-meta");
     meta.appendChild(lineMeta("编号", shortId(c.id)));
@@ -1204,6 +1382,11 @@
 
     var credRefresh = $("btn-cred-refresh-list");
     if (credRefresh) credRefresh.addEventListener("click", function () { loadCredentials(true); });
+
+    var dashboardRefresh = $("btn-dashboard-refresh");
+    if (dashboardRefresh) dashboardRefresh.addEventListener("click", function () { loadDashboard(false); });
+    var dashboardHours = $("dashboard-hours");
+    if (dashboardHours) dashboardHours.addEventListener("change", function () { loadDashboard(false); });
     var credSearch = $("cred-search");
     if (credSearch) credSearch.addEventListener("keydown", function (event) {
       if (event.key === "Enter") loadCredentials(true);
@@ -1283,7 +1466,7 @@
           state.system = sys;
           setText($("shell-version"), (sys && sys.version) || "管理后台");
           if (!location.hash || location.hash === "#" || location.hash === "#/") {
-            navigate("credentials");
+            navigate("dashboard");
           }
           render();
         })
@@ -1294,11 +1477,14 @@
           render();
         });
     } else {
-      if (!location.hash || location.hash === "#" || location.hash === "#/credentials") {
+      if (!location.hash || location.hash === "#" || location.hash === "#/credentials" || location.hash === "#/dashboard") {
         navigate("login");
       }
       render();
     }
+    setInterval(function () {
+      if (state.key && state.route === "dashboard") loadDashboard(true);
+    }, 10000);
   }
 
   if (document.readyState === "loading") {

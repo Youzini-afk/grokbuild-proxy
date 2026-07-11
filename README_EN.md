@@ -35,6 +35,7 @@ thinking blocks, encrypted reasoning replay, and Grok-hosted web search.
 - Multi-account selection, sticky sessions, cooldown, and failover
 - Grok CLI import and browser OAuth device login
 - Transactional SQLite WAL storage with automatic legacy JSON migration
+- CPA-style usage dashboard with global trends and per-account outcome timelines
 - Embedded Admin Web UI
 - Health, readiness, Prometheus metrics, request IDs, and structured logs
 - Multi-platform archives, checksums, SBOMs, and GHCR images

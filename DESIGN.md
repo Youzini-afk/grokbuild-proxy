@@ -218,6 +218,8 @@ secrets.
 - `/healthz` liveness
 - `/readyz` storage/credential readiness
 - Admin credential-pool summary
+- CPA-style call dashboard backed by batched `call_events` and lifetime
+  `credential_usage_stats`
 
 Prompts, request bodies, OAuth tokens, and generated keys are not logged.
 

@@ -9,7 +9,7 @@ import (
 	"time"
 )
 
-const runtimeFlushInterval = 30 * time.Second
+const runtimeFlushInterval = time.Second
 
 type Stats struct {
 	Backend            string `json:"backend"`
@@ -30,6 +30,9 @@ func (s *Store) Stats() Stats {
 	s.runtimeMu.Lock()
 	stats.PendingUsageWrites = len(s.pendingUsage)
 	s.runtimeMu.Unlock()
+	s.usageMu.RLock()
+	stats.PendingUsageWrites += len(s.pendingCallEvents)
+	s.usageMu.RUnlock()
 	if info, err := os.Stat(filepath.Join(s.dir, databaseFile)); err == nil {
 		stats.DatabaseBytes = info.Size()
 	}
@@ -47,6 +50,9 @@ func (s *Store) reloadCaches() error {
 	}
 	s.replaceCredentialCache(credentials)
 	s.replaceClientCache(clients.Clients)
+	if err := s.loadUsageCache(); err != nil {
+		return fmt.Errorf("storage: load usage cache: %w", err)
+	}
 	return nil
 }
 
@@ -178,6 +184,7 @@ func (s *Store) startRuntimeFlusher() {
 			select {
 			case <-ticker.C:
 				_ = s.flushRuntimeUsage()
+				_ = s.flushCallEvents()
 			case <-stop:
 				return
 			}
@@ -201,6 +208,7 @@ func (s *Store) stopRuntimeFlusher() {
 		<-done
 	}
 	_ = s.flushRuntimeUsage()
+	_ = s.flushCallEvents()
 }
 
 func (s *Store) flushRuntimeUsage() error {

@@ -55,6 +55,11 @@ type storageStatsProvider interface {
 	Stats() storage.Stats
 }
 
+type usageProvider interface {
+	CredentialUsage(id string) storage.CredentialUsage
+	UsageSummaryHours(hours int) (storage.UsageSummary, error)
+}
+
 // TokenService refreshes credentials and fetches billing.
 type TokenService interface {
 	ForceRefreshToken(ctx context.Context, credID string) (auth.TokenSet, storage.Credential, error)
@@ -84,27 +89,28 @@ type Handlers struct {
 
 // maskedCredential is a credential view with secrets redacted.
 type maskedCredential struct {
-	ID            string         `json:"id"`
-	Name          string         `json:"name"`
-	Email         string         `json:"email,omitempty"`
-	UserID        string         `json:"user_id,omitempty"`
-	TeamID        string         `json:"team_id,omitempty"`
-	OIDCClientID  string         `json:"oidc_client_id,omitempty"`
-	AccessToken   string         `json:"access_token"`  // masked
-	RefreshToken  string         `json:"refresh_token"` // masked
-	HasAccess     bool           `json:"has_access_token"`
-	HasRefresh    bool           `json:"has_refresh_token"`
-	ExpiresAt     time.Time      `json:"expires_at"`
-	Enabled       bool           `json:"enabled"`
-	Priority      int            `json:"priority"`
-	FailureCount  int            `json:"failure_count"`
-	CooldownUntil *time.Time     `json:"cooldown_until,omitempty"`
-	LastError     string         `json:"last_error,omitempty"`
-	LastUsedAt    *time.Time     `json:"last_used_at,omitempty"`
-	LastSuccessAt *time.Time     `json:"last_success_at,omitempty"`
-	Billing       map[string]any `json:"billing,omitempty"`
-	CreatedAt     time.Time      `json:"created_at"`
-	UpdatedAt     time.Time      `json:"updated_at"`
+	ID            string                  `json:"id"`
+	Name          string                  `json:"name"`
+	Email         string                  `json:"email,omitempty"`
+	UserID        string                  `json:"user_id,omitempty"`
+	TeamID        string                  `json:"team_id,omitempty"`
+	OIDCClientID  string                  `json:"oidc_client_id,omitempty"`
+	AccessToken   string                  `json:"access_token"`  // masked
+	RefreshToken  string                  `json:"refresh_token"` // masked
+	HasAccess     bool                    `json:"has_access_token"`
+	HasRefresh    bool                    `json:"has_refresh_token"`
+	ExpiresAt     time.Time               `json:"expires_at"`
+	Enabled       bool                    `json:"enabled"`
+	Priority      int                     `json:"priority"`
+	FailureCount  int                     `json:"failure_count"`
+	CooldownUntil *time.Time              `json:"cooldown_until,omitempty"`
+	LastError     string                  `json:"last_error,omitempty"`
+	LastUsedAt    *time.Time              `json:"last_used_at,omitempty"`
+	LastSuccessAt *time.Time              `json:"last_success_at,omitempty"`
+	Billing       map[string]any          `json:"billing,omitempty"`
+	CreatedAt     time.Time               `json:"created_at"`
+	UpdatedAt     time.Time               `json:"updated_at"`
+	Usage         storage.CredentialUsage `json:"usage"`
 }
 
 func maskCredential(c storage.Credential) maskedCredential {
@@ -257,8 +263,13 @@ func (h *Handlers) ListCredentials(w http.ResponseWriter, r *http.Request) {
 		end = len(creds)
 	}
 	out := make([]maskedCredential, 0, end-offset)
+	usage, hasUsage := h.Store.(usageProvider)
 	for _, c := range creds[offset:end] {
-		out = append(out, maskCredential(c))
+		masked := maskCredential(c)
+		if hasUsage {
+			masked.Usage = usage.CredentialUsage(c.ID)
+		}
+		out = append(out, masked)
 	}
 	nextOffset := 0
 	if end < len(creds) {
@@ -268,6 +279,36 @@ func (h *Handlers) ListCredentials(w http.ResponseWriter, r *http.Request) {
 		"credentials": out, "total": len(creds), "offset": offset,
 		"limit": limit, "next_offset": nextOffset,
 	})
+}
+
+// UsageSummary GET /admin/usage/summary?hours=24
+func (h *Handlers) UsageSummary(w http.ResponseWriter, r *http.Request) {
+	provider, ok := h.Store.(usageProvider)
+	if !ok {
+		writeErr(w, http.StatusNotImplemented, "usage statistics unavailable")
+		return
+	}
+	hours := queryInt(r, "hours", 24, 1, 24*30)
+	summary, err := provider.UsageSummaryHours(hours)
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"usage": summary, "hours": hours})
+}
+
+// CredentialUsage GET /admin/credentials/{id}/usage
+func (h *Handlers) CredentialUsage(w http.ResponseWriter, r *http.Request, id string) {
+	provider, ok := h.Store.(usageProvider)
+	if !ok {
+		writeErr(w, http.StatusNotImplemented, "usage statistics unavailable")
+		return
+	}
+	if _, err := h.Store.GetCredential(id); err != nil {
+		writeErr(w, http.StatusNotFound, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"credential_id": id, "usage": provider.CredentialUsage(id)})
 }
 
 // CreateCredential POST /admin/credentials

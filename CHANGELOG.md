@@ -18,6 +18,9 @@ Versioning and keeps the latest release under GitHub Releases.
 - Verified online backups, checksums, retention, CLI verification and offline
   restore with a pre-restore snapshot.
 - Credential-pick, failover, failure, and regional-model Prometheus counters.
+- CPA-style call dashboard with per-account success/failure totals, recent
+  outcome timelines, latency, model distribution, hourly trends and recent
+  request activity.
 
 ### Changed
 

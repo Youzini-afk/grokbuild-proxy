@@ -408,6 +408,39 @@ func TestAsyncImportJobCompletes(t *testing.T) {
 	}
 }
 
+func TestUsageSummaryAndCredentialListIncludeCallStats(t *testing.T) {
+	dir := t.TempDir()
+	store, err := storage.New(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	credential, err := store.CreateCredential(storage.CreateCredentialInput{UserID: "stats-user", Email: "stats@example.com", AccessToken: "a", RefreshToken: "r"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	store.RecordCredentialCall(storage.CallEvent{CredentialID: credential.ID, Model: "grok-4.5", Status: 200, Success: true, LatencyMS: 42, CreatedAt: time.Now().UTC()})
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	store, err = storage.New(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	h := &Handlers{Store: store}
+
+	rr := httptest.NewRecorder()
+	h.UsageSummary(rr, httptest.NewRequest(http.MethodGet, "/admin/usage/summary?hours=24", nil))
+	if rr.Code != http.StatusOK || !strings.Contains(rr.Body.String(), `"total_count":1`) {
+		t.Fatalf("summary status=%d body=%s", rr.Code, rr.Body.String())
+	}
+	rr = httptest.NewRecorder()
+	h.ListCredentials(rr, httptest.NewRequest(http.MethodGet, "/admin/credentials", nil))
+	if rr.Code != http.StatusOK || !strings.Contains(rr.Body.String(), `"success_count":1`) || !strings.Contains(rr.Body.String(), `"last_model":"grok-4.5"`) {
+		t.Fatalf("list status=%d body=%s", rr.Code, rr.Body.String())
+	}
+}
+
 type fakeDeviceOAuth struct {
 	polls int
 }

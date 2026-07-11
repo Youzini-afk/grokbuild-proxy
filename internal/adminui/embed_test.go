@@ -20,6 +20,30 @@ func TestEmbeddedStaticFilesPresent(t *testing.T) {
 	}
 }
 
+func TestEmbeddedDashboardAssetsPresent(t *testing.T) {
+	index, err := ReadStatic("index.html")
+	if err != nil {
+		t.Fatal(err)
+	}
+	app, err := ReadStatic("app.js")
+	if err != nil {
+		t.Fatal(err)
+	}
+	styles, err := ReadStatic("app.css")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(index), `id="page-dashboard"`) {
+		t.Fatal("dashboard page missing from embedded index")
+	}
+	if !strings.Contains(string(app), "/admin/usage/summary") {
+		t.Fatal("dashboard usage API missing from embedded app")
+	}
+	if !strings.Contains(string(styles), ".trend-chart") {
+		t.Fatal("dashboard styles missing from embedded CSS")
+	}
+}
+
 func TestIndexHandlerServesHTMLWithoutAuth(t *testing.T) {
 	req := httptest.NewRequest(http.MethodGet, "/admin", nil)
 	rec := httptest.NewRecorder()

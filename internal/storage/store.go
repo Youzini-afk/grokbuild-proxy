@@ -43,6 +43,10 @@ type Store struct {
 	pendingUsage map[string]time.Time
 	runtimeStop  chan struct{}
 	runtimeDone  chan struct{}
+
+	usageMu           sync.RWMutex
+	usageByCredential map[string]CredentialUsage
+	pendingCallEvents []CallEvent
 }
 
 // Options configures durable storage security.

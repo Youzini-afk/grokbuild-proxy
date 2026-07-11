@@ -16,6 +16,12 @@ rotation and failure state remain synchronous; high-frequency `last_used`
 timestamps are coalesced and flushed every 30 seconds and during graceful
 shutdown.
 
+Call statistics record only credential record id, model id, HTTP/network
+outcome, latency and timestamp. Prompts, response bodies and tokens are never
+stored in the statistics tables. Events are queued in memory and committed in
+one-second SQLite batches; the newest 100,000 detailed events are retained while
+per-credential lifetime totals remain in `credential_usage_stats`.
+
 ## Logs
 
 Logs are JSON on stdout. Request records include request ID, method, route

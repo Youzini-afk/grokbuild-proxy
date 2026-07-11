@@ -763,6 +763,65 @@ func TestBackupVerifyAndRestore(t *testing.T) {
 	}
 }
 
+func TestCredentialUsageIsCachedPersistedAndSummarized(t *testing.T) {
+	dir := t.TempDir()
+	s, err := New(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	credential, err := s.CreateCredential(CreateCredentialInput{UserID: "usage-user", AccessToken: "a", RefreshToken: "r"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC().Truncate(time.Second)
+	s.RecordCredentialCall(CallEvent{CredentialID: credential.ID, Model: "grok-4.5", Status: 200, Success: true, LatencyMS: 120, CreatedAt: now.Add(-time.Minute)})
+	s.RecordCredentialCall(CallEvent{CredentialID: credential.ID, Model: "grok-4.5", Status: 429, Success: false, LatencyMS: 80, Error: "limited", CreatedAt: now})
+	usage := s.CredentialUsage(credential.ID)
+	if usage.SuccessCount != 1 || usage.FailureCount != 1 || usage.TotalCount != 2 || usage.AverageMS != 100 || len(usage.Recent) != 2 {
+		t.Fatalf("cached usage=%+v", usage)
+	}
+	if err := s.flushCallEvents(); err != nil {
+		t.Fatal(err)
+	}
+	summary, err := s.UsageSummaryHours(24)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if summary.TotalCount != 2 || summary.SuccessCount != 1 || summary.FailureCount != 1 || summary.ActiveAccounts != 1 || len(summary.Recent) != 2 {
+		t.Fatalf("summary=%+v", summary)
+	}
+	if err := s.Close(); err != nil {
+		t.Fatal(err)
+	}
+	s, err = New(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	usage = s.CredentialUsage(credential.ID)
+	if usage.TotalCount != 2 || len(usage.Recent) != 2 || usage.LastModel != "grok-4.5" {
+		t.Fatalf("reloaded usage=%+v", usage)
+	}
+}
+
+func TestPendingCallForDeletedCredentialIsDiscarded(t *testing.T) {
+	s := newTestStore(t)
+	credential, err := s.CreateCredential(CreateCredentialInput{UserID: "deleted-usage-user", AccessToken: "a", RefreshToken: "r"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.RecordCredentialCall(CallEvent{CredentialID: credential.ID, Model: "grok-4.5", Status: 200, Success: true, CreatedAt: time.Now().UTC()})
+	if err := s.DeleteCredential(credential.ID); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.flushCallEvents(); err != nil {
+		t.Fatalf("flush orphaned call event: %v", err)
+	}
+	if pending := s.Stats().PendingUsageWrites; pending != 0 {
+		t.Fatalf("pending usage writes=%d want 0", pending)
+	}
+}
+
 func TestNewRejectsDangerousDataDirs(t *testing.T) {
 	if _, err := New(string(filepath.Separator)); err == nil {
 		t.Fatal("filesystem root must be rejected")

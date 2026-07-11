@@ -25,6 +25,7 @@ func (h *Handlers) Register(mux *http.ServeMux) {
 	mux.HandleFunc("GET /admin/credentials/export", h.ExportCredentials)
 	mux.HandleFunc("POST /admin/credentials", h.CreateCredential)
 	mux.HandleFunc("POST /admin/credentials/import-grok", h.ImportGrok)
+	mux.HandleFunc("GET /admin/usage/summary", h.UsageSummary)
 	mux.HandleFunc("GET /admin/import-jobs/{id}", func(w http.ResponseWriter, r *http.Request) {
 		h.GetImportJob(w, r, r.PathValue("id"))
 	})
@@ -46,6 +47,9 @@ func (h *Handlers) Register(mux *http.ServeMux) {
 	})
 	mux.HandleFunc("GET /admin/credentials/{id}/billing", func(w http.ResponseWriter, r *http.Request) {
 		h.CredentialBilling(w, r, r.PathValue("id"))
+	})
+	mux.HandleFunc("GET /admin/credentials/{id}/usage", func(w http.ResponseWriter, r *http.Request) {
+		h.CredentialUsage(w, r, r.PathValue("id"))
 	})
 	mux.HandleFunc("DELETE /admin/credentials/{id}", func(w http.ResponseWriter, r *http.Request) {
 		h.DeleteCredential(w, r, r.PathValue("id"))
@@ -83,6 +87,8 @@ func (h *Handlers) dispatchFallback(w http.ResponseWriter, r *http.Request) {
 		h.CreateCredential(w, r)
 	case path == "/admin/credentials/import-grok" && r.Method == http.MethodPost:
 		h.ImportGrok(w, r)
+	case path == "/admin/usage/summary" && r.Method == http.MethodGet:
+		h.UsageSummary(w, r)
 	case strings.HasPrefix(path, "/admin/import-jobs/"):
 		id := strings.TrimPrefix(path, "/admin/import-jobs/")
 		if r.Method == http.MethodGet {
@@ -119,6 +125,9 @@ func (h *Handlers) dispatchFallback(w http.ResponseWriter, r *http.Request) {
 				return
 			case rest == "billing" && r.Method == http.MethodGet:
 				h.CredentialBilling(w, r, id)
+				return
+			case rest == "usage" && r.Method == http.MethodGet:
+				h.CredentialUsage(w, r, id)
 				return
 			case rest == "" && r.Method == http.MethodDelete:
 				h.DeleteCredential(w, r, id)

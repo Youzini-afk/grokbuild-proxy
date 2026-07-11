@@ -34,6 +34,9 @@ func (s *Store) CreateBackup() (BackupInfo, error) {
 	if err := s.flushRuntimeUsage(); err != nil {
 		return BackupInfo{}, err
 	}
+	if err := s.flushCallEvents(); err != nil {
+		return BackupInfo{}, err
+	}
 	dir := filepath.Join(s.dir, "backups")
 	if err := os.MkdirAll(dir, dirMode); err != nil {
 		return BackupInfo{}, err

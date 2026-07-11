@@ -23,6 +23,7 @@ type memStore struct {
 	mu      sync.Mutex
 	creds   map[string]storage.Credential
 	patches int
+	events  []storage.CallEvent
 }
 
 func newMemStore(creds ...storage.Credential) *memStore {
@@ -79,6 +80,12 @@ func (m *memStore) PatchCredential(id string, mutate func(*storage.Credential) e
 	c.ID = id
 	m.creds[id] = c
 	return c, nil
+}
+
+func (m *memStore) RecordCredentialCall(event storage.CallEvent) {
+	m.mu.Lock()
+	m.events = append(m.events, event)
+	m.mu.Unlock()
 }
 
 func TestTouchLastUsedIsThrottled(t *testing.T) {
@@ -174,6 +181,12 @@ func TestExecutorPostSuccess(t *testing.T) {
 	}
 	if gotModel != "grok-4.5" {
 		t.Fatalf("model override = %q", gotModel)
+	}
+	store.mu.Lock()
+	events := append([]storage.CallEvent(nil), store.events...)
+	store.mu.Unlock()
+	if len(events) != 1 || !events[0].Success || events[0].Model != "grok-4.5" || events[0].Status != 200 {
+		t.Fatalf("usage events=%+v", events)
 	}
 }
 

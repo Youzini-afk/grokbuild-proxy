@@ -147,6 +147,24 @@ func createSQLiteSchema(db *sql.DB) error {
 		`CREATE TABLE IF NOT EXISTS bootstrap_meta (
 			id INTEGER PRIMARY KEY CHECK (id = 1), api_key TEXT NOT NULL DEFAULT '', admin_key TEXT NOT NULL DEFAULT ''
 		)`,
+		`CREATE TABLE IF NOT EXISTS credential_usage_stats (
+			credential_id TEXT PRIMARY KEY REFERENCES credentials(id) ON DELETE CASCADE,
+			success_count INTEGER NOT NULL DEFAULT 0,
+			failure_count INTEGER NOT NULL DEFAULT 0,
+			total_latency_ms INTEGER NOT NULL DEFAULT 0,
+			last_status INTEGER NOT NULL DEFAULT 0,
+			last_model TEXT NOT NULL DEFAULT '',
+			last_called_at TEXT NOT NULL DEFAULT ''
+		)`,
+		`CREATE TABLE IF NOT EXISTS call_events (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			credential_id TEXT NOT NULL REFERENCES credentials(id) ON DELETE CASCADE,
+			model TEXT NOT NULL DEFAULT '', status INTEGER NOT NULL DEFAULT 0,
+			success INTEGER NOT NULL DEFAULT 0, latency_ms INTEGER NOT NULL DEFAULT 0,
+			error TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_call_events_created ON call_events(created_at DESC)`,
+		`CREATE INDEX IF NOT EXISTS idx_call_events_credential ON call_events(credential_id,id DESC)`,
 	}
 	for _, statement := range statements {
 		if _, err := db.Exec(statement); err != nil {
@@ -432,6 +450,7 @@ func (s *Store) dbDeleteCredential(id string) error {
 			return fmt.Errorf("storage: credential %q not found", id)
 		}
 		s.removeCachedCredential(id)
+		s.removeCredentialUsage(id)
 		return nil
 	})
 }
