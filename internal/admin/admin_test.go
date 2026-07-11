@@ -434,6 +434,9 @@ func TestUsageSummaryAndCredentialListIncludeCallStats(t *testing.T) {
 	if rr.Code != http.StatusOK || !strings.Contains(rr.Body.String(), `"total_count":1`) {
 		t.Fatalf("summary status=%d body=%s", rr.Code, rr.Body.String())
 	}
+	if cacheControl := rr.Header().Get("Cache-Control"); !strings.Contains(cacheControl, "no-store") {
+		t.Fatalf("summary Cache-Control=%q", cacheControl)
+	}
 	rr = httptest.NewRecorder()
 	h.ListCredentials(rr, httptest.NewRequest(http.MethodGet, "/admin/credentials", nil))
 	if rr.Code != http.StatusOK || !strings.Contains(rr.Body.String(), `"success_count":1`) || !strings.Contains(rr.Body.String(), `"last_model":"grok-4.5"`) {

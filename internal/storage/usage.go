@@ -371,6 +371,12 @@ func (s *Store) UsageSummaryHours(hours int) (UsageSummary, error) {
 	if hours > 24*30 {
 		hours = 24 * 30
 	}
+	// A dashboard refresh is also a durability barrier. This prevents the UI
+	// from showing a stale zero while the one-second background batch is still
+	// pending, and surfaces persistence failures instead of silently hiding them.
+	if err := s.flushCallEvents(); err != nil {
+		return UsageSummary{}, err
+	}
 	summary, err := s.UsageSummary(time.Now().UTC().Add(-time.Duration(hours) * time.Hour))
 	if err != nil {
 		return summary, err

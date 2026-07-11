@@ -114,7 +114,7 @@
     if (state.key) {
       headers.Authorization = "Bearer " + state.key;
     }
-    var opts = { method: method, headers: headers };
+    var opts = { method: method, headers: headers, cache: "no-store" };
     if (body !== undefined) {
       headers["Content-Type"] = "application/json";
       opts.body = typeof body === "string" ? body : JSON.stringify(body);

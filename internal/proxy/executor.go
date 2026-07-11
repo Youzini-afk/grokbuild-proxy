@@ -34,6 +34,8 @@ type Store interface {
 	UpdateCredential(c storage.Credential) (storage.Credential, error)
 	// PatchCredential applies a mutation under a single store lock (preferred for concurrent updates).
 	PatchCredential(id string, mutate func(*storage.Credential) error) (storage.Credential, error)
+	// RecordCredentialCall records every selected credential's upstream outcome.
+	RecordCredentialCall(event storage.CallEvent)
 }
 
 type credentialSnapshotStore interface {
@@ -42,10 +44,6 @@ type credentialSnapshotStore interface {
 
 type credentialUsageRecorder interface {
 	RecordCredentialUsage(id string, usedAt time.Time)
-}
-
-type credentialCallRecorder interface {
-	RecordCredentialCall(event storage.CallEvent)
 }
 
 // Selector is the subset of lb.Selector used by the executor.
@@ -329,8 +327,7 @@ func (e *Executor) Post(ctx context.Context, model, convID string, body []byte, 
 }
 
 func (e *Executor) recordCredentialCall(credential storage.Credential, model string, status int, success bool, started time.Time, callErr error) {
-	recorder, ok := e.Store.(credentialCallRecorder)
-	if !ok {
+	if e == nil || e.Store == nil {
 		return
 	}
 	latency := time.Since(started)
@@ -343,7 +340,7 @@ func (e *Executor) recordCredentialCall(credential storage.Credential, model str
 	} else if !success && status > 0 {
 		errorMessage = http.StatusText(status)
 	}
-	recorder.RecordCredentialCall(storage.CallEvent{
+	e.Store.RecordCredentialCall(storage.CallEvent{
 		CredentialID: credential.ID,
 		Model:        model,
 		Status:       status,

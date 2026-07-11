@@ -190,6 +190,53 @@ func TestExecutorPostSuccess(t *testing.T) {
 	}
 }
 
+func TestExecutorPersistentStoreUsageIsImmediatelyVisible(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"id":"resp_persisted","status":"completed"}`))
+	}))
+	t.Cleanup(srv.Close)
+
+	store, err := storage.New(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	credential, err := store.CreateCredential(storage.CreateCredentialInput{
+		UserID: "persistent-usage-user", AccessToken: "access-token", RefreshToken: "refresh-token",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if credential.ID == "" {
+		t.Fatal("created credential has no id")
+	}
+
+	executor := &Executor{
+		Store:     store,
+		Selector:  lb.New(config.LBConfig{Strategy: "priority_rr"}),
+		Upstream:  upstream.NewClient(upstream.Config{BaseURL: srv.URL + "/v1", HTTPClient: srv.Client()}),
+		Refresher: passthroughRefresher{},
+	}
+	resp, err := executor.Post(context.Background(), "grok-4.5", "", []byte(`{"model":"grok-4.5","input":"hello"}`), false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = resp.Body.Close()
+
+	summary, err := store.UsageSummaryHours(24)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if summary.TotalCount != 1 || summary.SuccessCount != 1 || summary.ActiveAccounts != 1 {
+		t.Fatalf("usage summary immediately after request=%+v", summary)
+	}
+	usage := store.CredentialUsage(credential.ID)
+	if usage.TotalCount != 1 || usage.LastStatus != http.StatusOK || usage.LastModel != "grok-4.5" {
+		t.Fatalf("credential usage=%+v", usage)
+	}
+}
+
 func TestExecutorPostFailoverOn429(t *testing.T) {
 	var mu sync.Mutex
 	hits := map[string]int{}
