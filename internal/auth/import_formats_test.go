@@ -62,6 +62,33 @@ func TestParseGrokAuthJSONCPAUsesJWTMetadataFallback(t *testing.T) {
 	}
 }
 
+func TestParseGrokAuthJSONCPAAcceptsNumericExpiry(t *testing.T) {
+	want := time.Date(2026, 7, 12, 12, 0, 0, 0, time.UTC)
+	for name, expiresAt := range map[string]any{
+		"seconds":      want.Unix(),
+		"milliseconds": want.UnixMilli(),
+		"microseconds": want.UnixMicro(),
+		"nanoseconds":  want.UnixNano(),
+	} {
+		t.Run(name, func(t *testing.T) {
+			raw, err := json.Marshal(map[string]any{
+				"type": "xai", "access_token": "numeric-access",
+				"refresh_token": "numeric-refresh", "expires_at": expiresAt,
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			credentials, err := ParseGrokAuthJSON(raw)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(credentials) != 1 || !credentials[0].ExpiresAt.Equal(want) {
+				t.Fatalf("expires=%v want=%v", credentials[0].ExpiresAt, want)
+			}
+		})
+	}
+}
+
 func TestParseGrokAuthJSONSub2APIWrapper(t *testing.T) {
 	raw := `{"accounts":[
 		{"name":"wrapped-grok","platform":"grok","type":"oauth","priority":275,

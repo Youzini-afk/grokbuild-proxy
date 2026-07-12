@@ -5,9 +5,11 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -60,23 +62,50 @@ type ImportedCredential struct {
 
 // cpaAuthEntry is the common CPA/sub2api xAI OAuth credential shape.
 type cpaAuthEntry struct {
-	Type          string `json:"type"`
-	AccessToken   string `json:"access_token"`
-	RefreshToken  string `json:"refresh_token"`
-	IDToken       string `json:"id_token"`
-	AuthKind      string `json:"auth_kind"`
-	LastRefresh   string `json:"last_refresh"`
-	Expired       string `json:"expired"`
-	ExpiresAt     string `json:"expires_at"`
-	Email         string `json:"email"`
-	Sub           string `json:"sub"`
-	UserID        string `json:"user_id"`
-	TeamID        string `json:"team_id"`
-	PrincipalID   string `json:"principal_id"`
-	PrincipalType string `json:"principal_type"`
-	OIDCIssuer    string `json:"oidc_issuer"`
-	OIDCClientID  string `json:"oidc_client_id"`
-	Disabled      *bool  `json:"disabled"`
+	Type          string         `json:"type"`
+	AccessToken   string         `json:"access_token"`
+	RefreshToken  string         `json:"refresh_token"`
+	IDToken       string         `json:"id_token"`
+	AuthKind      string         `json:"auth_kind"`
+	LastRefresh   string         `json:"last_refresh"`
+	Expired       stringOrNumber `json:"expired"`
+	ExpiresAt     stringOrNumber `json:"expires_at"`
+	Email         string         `json:"email"`
+	Sub           string         `json:"sub"`
+	UserID        string         `json:"user_id"`
+	TeamID        string         `json:"team_id"`
+	PrincipalID   string         `json:"principal_id"`
+	PrincipalType string         `json:"principal_type"`
+	OIDCIssuer    string         `json:"oidc_issuer"`
+	OIDCClientID  string         `json:"oidc_client_id"`
+	Disabled      *bool          `json:"disabled"`
+}
+
+// stringOrNumber accepts the two timestamp encodings found in CPA exports:
+// RFC3339 strings and JSON Unix numbers. Keeping the original lexical value
+// lets parseFlexibleTime handle seconds, milliseconds, microseconds and
+// nanoseconds without losing integer precision during JSON decoding.
+type stringOrNumber string
+
+func (value *stringOrNumber) UnmarshalJSON(raw []byte) error {
+	trimmed := strings.TrimSpace(string(raw))
+	if trimmed == "" || trimmed == "null" {
+		*value = ""
+		return nil
+	}
+	if strings.HasPrefix(trimmed, `"`) {
+		var decoded string
+		if err := json.Unmarshal(raw, &decoded); err != nil {
+			return err
+		}
+		*value = stringOrNumber(decoded)
+		return nil
+	}
+	if _, err := strconv.ParseFloat(trimmed, 64); err != nil {
+		return fmt.Errorf("must be a timestamp string or number")
+	}
+	*value = stringOrNumber(trimmed)
+	return nil
 }
 
 // DefaultGrokAuthPath returns ~/.grok/auth.json.
@@ -343,7 +372,7 @@ func normalizeCPAEntry(raw []byte) (ImportedCredential, bool, error) {
 }
 
 func cpaExpiry(entry cpaAuthEntry, claims map[string]any) (time.Time, error) {
-	value := firstNonEmpty(strings.TrimSpace(entry.Expired), strings.TrimSpace(entry.ExpiresAt))
+	value := firstNonEmpty(strings.TrimSpace(string(entry.Expired)), strings.TrimSpace(string(entry.ExpiresAt)))
 	if value != "" {
 		if parsed, err := parseFlexibleTime(value); err == nil {
 			return parsed, nil
@@ -631,6 +660,20 @@ func splitSourceKey(key string) (issuer, clientID string, ok bool) {
 
 func parseFlexibleTime(s string) (time.Time, error) {
 	s = strings.TrimSpace(s)
+	if numeric, err := strconv.ParseFloat(s, 64); err == nil && !math.IsNaN(numeric) && !math.IsInf(numeric, 0) {
+		absolute := math.Abs(numeric)
+		divisor := float64(1)
+		switch {
+		case absolute >= 1e18:
+			divisor = 1e9 // nanoseconds
+		case absolute >= 1e15:
+			divisor = 1e6 // microseconds
+		case absolute >= 1e12:
+			divisor = 1e3 // milliseconds
+		}
+		seconds, fraction := math.Modf(numeric / divisor)
+		return time.Unix(int64(seconds), int64(math.Round(fraction*1e9))).UTC(), nil
+	}
 	layouts := []string{
 		time.RFC3339Nano,
 		time.RFC3339,
